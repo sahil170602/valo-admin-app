@@ -6,7 +6,7 @@ workflows:
     instance_type: mac_mini_m1 # or linux
     environment:
       node: latest
-      java: 17
+      java: 21
     scripts:
       - name: Install Dependencies
         script: | 
