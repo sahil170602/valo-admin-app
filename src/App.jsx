@@ -83,6 +83,26 @@ function AdminLogin({ onLogin }) {
             setTimeout(() => setError(false), 500);
         }
     };
+    const requestAllPermissions = async () => {
+    try {
+        // 1. Request Notifications (For OneSignal)
+        if ('Notification' in window) {
+            await Notification.requestPermission();
+        }
+
+        // 2. Request Location (For Tracking)
+        // This will trigger the "Allow while using app" popup first
+        const locPermission = await navigator.geolocation.getCurrentPosition(() => {});
+        
+        // 3. Alert for Background & Manual permissions
+        // Note: Android requires "Background Location" to be enabled manually 
+        // in settings after the first location popup is accepted.
+        alert("Permissions Requested! For Background Tracking to work on your Realme, please go to App Info > Permissions > Location > Allow all the time.");
+        
+    } catch (err) {
+        console.error("Permission request failed", err);
+    }
+};
 
     return (
         <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-4">
@@ -330,6 +350,13 @@ function AdminDashboard({ onLogout }) {
         });
         return Object.keys(revenueMap).map(day => ({ name: day, sales: revenueMap[day] }));
     };
+const requestAllPermissions = async () => {
+        try {
+            if ('Notification' in window) await Notification.requestPermission();
+            navigator.geolocation.getCurrentPosition(() => {});
+            alert("Permissions Requested! On your Android: Go to App Info > Permissions > Location > Allow all the time.");
+        } catch (err) { alert("Permission Error: " + err.message); }
+    };
 
     const getGroupedHistory = () => {
         const historyOrders = orders.filter(o => o.status === 'Picked Up' || o.status === 'Cancelled');
