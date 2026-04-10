@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Valo Admin</string>
+    <string name="title_activity_main">Valo Admin</string>
+    <string name="package_name">com.valo.admin</string>
+    <string name="custom_url_scheme">com.valo.admin</string>
+</resources>

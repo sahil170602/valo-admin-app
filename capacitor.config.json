@@ -1,0 +1,6 @@
+{
+  "appId": "com.valo.admin",
+  "appName": "Valo Admin",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
