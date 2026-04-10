@@ -17,17 +17,12 @@ android {
         }
     }
 
-    // --- ADDED THIS SECTION FOR JAVA 21 SUPPORT ---
+    // --- JAVA 21 SUPPORT (Corrected) ---
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
-
-    // This ensures Kotlin code also uses the Java 21 target
-    kotlinOptions {
-        jvmTarget = '21'
-    }
-    // ----------------------------------------------
+    // -----------------------------------
 
     buildTypes {
         release {
