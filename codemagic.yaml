@@ -1,0 +1,30 @@
+# Codemagic Configuration for Valo Experience Admin
+workflows:
+  android-capacitor-build:
+    name: Valo Admin APK Build
+    max_build_duration: 20
+    instance_type: mac_mini_m1 # or linux
+    environment:
+      node: latest
+      java: 17
+    scripts:
+      - name: Install Dependencies
+        script: | 
+          npm install
+      - name: Build Vite Web App
+        script: | 
+          npm run build
+      - name: Capacitor Sync
+        script: | 
+          npx cap sync android
+      - name: Build Android Debug APK
+        script: | 
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+    artifacts:
+      - android/app/build/outputs/apk/debug/*.apk
+    publishing:
+      email:
+        recipients:
+          - sahilmeshram1917@gmail.com 
