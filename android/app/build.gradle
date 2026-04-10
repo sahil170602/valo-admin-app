@@ -3,6 +3,7 @@ apply plugin: 'com.android.application'
 android {
     namespace = "com.valo.admin"
     compileSdk = rootProject.ext.compileSdkVersion
+    
     defaultConfig {
         applicationId "com.valo.admin"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -11,11 +12,23 @@ android {
         versionName "1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+             // Files and dirs to omit from the packaged assets dir
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+
+    // --- ADDED THIS SECTION FOR JAVA 21 SUPPORT ---
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    // This ensures Kotlin code also uses the Java 21 target
+    kotlinOptions {
+        jvmTarget = '21'
+    }
+    // ----------------------------------------------
+
     buildTypes {
         release {
             minifyEnabled false
