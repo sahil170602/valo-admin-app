@@ -157,24 +157,27 @@ function AdminDashboard({ onLogout }) {
     const [selectedTableFilter, setSelectedTableFilter] = useState('All');
     const audioRef = useRef(null);
 
-    // --- ONE SIGNAL PUSH NOTIFICATION SETUP ---
-    useEffect(() => {
-        const setupNotifications = async () => {
-            if (isOneSignalInitialized) return;
-            try {
-                isOneSignalInitialized = true;
-                await OneSignal.init({
-                    appId: "3a830d21-fca2-4484-a905-84bb421754e1", 
-                    allowLocalhostAsSecureOrigin: true, 
-                });
-                OneSignal.Slidedown.promptPush();
-            } catch (error) {
-                if (error.message && error.message.includes('already initialized')) return;
-                console.error("OneSignal Setup Note: Ensure you have pasted your real App ID...", error);
-            }
-        };
-        setupNotifications();
-    }, []);
+   // --- ONE SIGNAL PUSH NOTIFICATION SETUP ---
+useEffect(() => {
+    const setupNotifications = async () => {
+        // COMMENT THIS SECTION OUT FOR NOW TO FIX THE CRASH
+        /*
+        if (isOneSignalInitialized) return;
+        try {
+            isOneSignalInitialized = true;
+            await OneSignal.init({
+                appId: "3a830d21-fca2-4484-a905-84bb421754e1", 
+                allowLocalhostAsSecureOrigin: true, 
+            });
+            OneSignal.Slidedown.promptPush();
+        } catch (error) {
+            console.error("OneSignal Error", error);
+        }
+        */
+        console.log("OneSignal disabled for APK debugging");
+    };
+    setupNotifications();
+}, []);
 
     // --- AUDIO UNLOCKER ---
     useEffect(() => {
