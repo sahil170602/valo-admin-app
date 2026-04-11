@@ -6,6 +6,34 @@ export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
     const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('valo_admin_auth') === 'true');
 
+    useEffect(() => {
+        const initOneSignal = async () => {
+            // Give the app 2 seconds to settle
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            if (window.plugins && window.plugins.OneSignal) {
+                // 1. Initialize
+                window.plugins.OneSignal.initialize("3a830d21-fca2-4484-a905-84bb421754e1");
+
+                // 2. IMPORTANT: Get Permission (This triggers the popup)
+                window.plugins.OneSignal.Notifications.requestPermission(true);
+
+                // 3. Foreground display logic
+                window.plugins.OneSignal.Notifications.addEventListener("foregroundWillDisplay", (event) => {
+                    event.getNotification().display(); 
+                });
+
+                // 4. Debug: Check your Player ID in the console
+                window.plugins.OneSignal.User.getOnesignalId().then(id => {
+                    console.log("OneSignal Device ID:", id);
+                });
+            }
+        };
+        initOneSignal();
+    }, []);
+
+   
+
     // Timer for Cinematic Splash Screen
     useEffect(() => {
         const timer = setTimeout(() => {
