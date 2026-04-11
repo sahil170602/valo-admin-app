@@ -158,25 +158,29 @@ function AdminDashboard({ onLogout }) {
     const audioRef = useRef(null);
 
    // --- ONE SIGNAL PUSH NOTIFICATION SETUP ---
+// Add this inside your App component
 useEffect(() => {
-    const setupNotifications = async () => {
-        // COMMENT THIS SECTION OUT FOR NOW TO FIX THE CRASH
-        /*
-        if (isOneSignalInitialized) return;
-        try {
-            isOneSignalInitialized = true;
-            await OneSignal.init({
-                appId: "3a830d21-fca2-4484-a905-84bb421754e1", 
-                allowLocalhostAsSecureOrigin: true, 
+    // Only run this on actual native devices
+    const setupNativeNotifications = () => {
+        if (window.plugins && window.plugins.OneSignal) {
+            // Initialize OneSignal
+            window.plugins.OneSignal.setAppId("3a830d21-fca2-4484-a905-84bb421754e1");
+
+            // Prompt for permission (Crucial for Android 13+)
+            window.plugins.OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
+                console.log("User accepted notifications: " + accepted);
             });
-            OneSignal.Slidedown.promptPush();
-        } catch (error) {
-            console.error("OneSignal Error", error);
+
+            // What to do when a notification is clicked
+            window.plugins.OneSignal.setNotificationOpenedHandler((openedResult) => {
+                console.log('Notification opened:', openedResult);
+            });
+        } else {
+            console.log("OneSignal Native Plugin not found. This is normal in a browser.");
         }
-        */
-        console.log("OneSignal disabled for APK debugging");
     };
-    setupNotifications();
+
+    setupNativeNotifications();
 }, []);
 
     // --- AUDIO UNLOCKER ---
