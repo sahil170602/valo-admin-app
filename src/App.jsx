@@ -27,7 +27,7 @@ export default function AdminPanel() {
 // --- UPDATED SPLASH SCREEN WITH IMAGE ---
 function SplashScreen() {
     // Replace '/logo.png' with your actual image path or URL
-    const logoUrl = 'splash.png'; 
+    const logoUrl = '/splash.png'; 
 
     return (
         <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center overflow-hidden relative">
@@ -157,30 +157,27 @@ function AdminDashboard({ onLogout }) {
     const audioRef = useRef(null);
 
 useEffect(() => {
-    const setupNativeNotifications = () => {
-        // Check if we are on a mobile device and plugin exists
+    const setupNativeNotifications = async () => {
+        // Wait 2 seconds for the native bridge to be 100% ready
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
         if (window.plugins && window.plugins.OneSignal) {
+            console.log("Initializing Native OneSignal...");
             
-            // --- UPDATED FOR V5 ---
             // 1. Initialize
             window.plugins.OneSignal.initialize("3a830d21-fca2-4484-a905-84bb421754e1");
 
-            // Add this line specifically to trigger the Android Notification Permission popup
-window.plugins.OneSignal.Notifications.requestPermission(true).then((success) => {
-    console.log("Notification permission result:", success);
-});
+            // 2. Trigger Permission Popup
+            window.plugins.OneSignal.Notifications.requestPermission(true).then((success) => {
+                console.log("Notification permission result:", success);
+            });
 
-            
+            // 3. Force Foreground Banner
             window.plugins.OneSignal.Notifications.addEventListener("foregroundWillDisplay", (event) => {
-    console.log("Notification received in foreground:", event);
-    // This tells Android to show the notification banner and play the sound
-    event.getNotification().display(); 
-});
-        } else {
-            console.log("Not a native device. Skipping OneSignal.");
+                event.getNotification().display(); 
+            });
         }
     };
-
     setupNativeNotifications();
 }, []);
 
