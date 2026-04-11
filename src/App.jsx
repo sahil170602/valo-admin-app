@@ -165,16 +165,17 @@ useEffect(() => {
             // 1. Initialize
             window.plugins.OneSignal.initialize("3a830d21-fca2-4484-a905-84bb421754e1");
 
-            // 2. Request Permission
-            window.plugins.OneSignal.Notifications.requestPermission(true).then((success) => {
-                console.log("Notification permission status:", success);
-            });
+            // Add this line specifically to trigger the Android Notification Permission popup
+window.plugins.OneSignal.Notifications.requestPermission(true).then((success) => {
+    console.log("Notification permission result:", success);
+});
 
-            // 3. Optional: Add a listener for when a notification is clicked
-            window.plugins.OneSignal.Notifications.addEventListener("click", (event) => {
-                console.log("Notification clicked:", event);
-            });
             
+            window.plugins.OneSignal.Notifications.addEventListener("foregroundWillDisplay", (event) => {
+    console.log("Notification received in foreground:", event);
+    // This tells Android to show the notification banner and play the sound
+    event.getNotification().display(); 
+});
         } else {
             console.log("Not a native device. Skipping OneSignal.");
         }
