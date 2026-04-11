@@ -27,7 +27,7 @@ export default function AdminPanel() {
 // --- UPDATED SPLASH SCREEN WITH IMAGE ---
 function SplashScreen() {
     // Replace '/logo.png' with your actual image path or URL
-    const logoUrl = '/logo.png'; 
+    const logoUrl = 'splash.png'; 
 
     return (
         <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center overflow-hidden relative">
@@ -156,26 +156,27 @@ function AdminDashboard({ onLogout }) {
     const [selectedTableFilter, setSelectedTableFilter] = useState('All');
     const audioRef = useRef(null);
 
-   // --- ONE SIGNAL PUSH NOTIFICATION SETUP ---
-// Add this inside your App component
 useEffect(() => {
-    // Only run this on actual native devices
     const setupNativeNotifications = () => {
+        // Check if we are on a mobile device and plugin exists
         if (window.plugins && window.plugins.OneSignal) {
-            // Initialize OneSignal
-            window.plugins.OneSignal.setAppId("3a830d21-fca2-4484-a905-84bb421754e1");
+            
+            // --- UPDATED FOR V5 ---
+            // 1. Initialize
+            window.plugins.OneSignal.initialize("3a830d21-fca2-4484-a905-84bb421754e1");
 
-            // Prompt for permission (Crucial for Android 13+)
-            window.plugins.OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
-                console.log("User accepted notifications: " + accepted);
+            // 2. Request Permission
+            window.plugins.OneSignal.Notifications.requestPermission(true).then((success) => {
+                console.log("Notification permission status:", success);
             });
 
-            // What to do when a notification is clicked
-            window.plugins.OneSignal.setNotificationOpenedHandler((openedResult) => {
-                console.log('Notification opened:', openedResult);
+            // 3. Optional: Add a listener for when a notification is clicked
+            window.plugins.OneSignal.Notifications.addEventListener("click", (event) => {
+                console.log("Notification clicked:", event);
             });
+            
         } else {
-            console.log("OneSignal Native Plugin not found. This is normal in a browser.");
+            console.log("Not a native device. Skipping OneSignal.");
         }
     };
 
