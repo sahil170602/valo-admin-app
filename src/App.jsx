@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import OneSignal from 'react-onesignal'; 
-let isOneSignalInitialized = false;
+
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
     const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('valo_admin_auth') === 'true');
