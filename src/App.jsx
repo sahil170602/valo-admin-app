@@ -46,7 +46,7 @@ function SplashScreen() {
                         src={logoUrl} 
                         alt="Logo" 
                         className="w-28 h-28 object-contain drop-shadow-[0_0_15px_rgba(34,211,238,0.5)]"
-                        onError={(e) => { e.target.src = "./icon.png" }} // Fallback if image not found
+                        onError={(e) => { e.target.src = "splash.png" }} // Fallback if image not found
                     />
                 </div>
                 
@@ -69,7 +69,7 @@ function SplashScreen() {
 function AdminLogin({ onLogin }) {
     const [pin, setPin] = useState("");
     const [error, setError] = useState(false);
-    const logoUrl = '/logo.png'; // Replace with your image path
+    const logoUrl = 'splash.png'; // Replace with your image path
 
     const handleSubmit = (e) => {
         e.preventDefault();
