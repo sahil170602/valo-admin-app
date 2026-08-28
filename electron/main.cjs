@@ -11,12 +11,9 @@ function createWindow() {
       contextIsolation: false
     }
   });
-
   win.loadFile(path.join(__dirname, '../dist/index.html'));
 }
-
 app.whenReady().then(createWindow);
-
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });

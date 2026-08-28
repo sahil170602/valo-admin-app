@@ -3,7 +3,7 @@ name: Build Windows App
 on:
   push:
     branches: [ "main", "master" ]
-  workflow_dispatch: # Allows you to manually click a "Build" button
+  workflow_dispatch:
 
 jobs:
   build:
