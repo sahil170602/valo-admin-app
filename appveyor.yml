@@ -1,0 +1,21 @@
+version: 1.0.{build}
+image: Visual Studio 2022
+clone_depth: 1
+
+environment:
+  nodejs_version: "20"
+
+init:
+  - ps: Install-Product node $env:nodejs_version
+  - node --version
+  - npm --version
+
+build_script:
+  - npm install
+  - npm run build-win
+
+artifacts:
+  - path: release\*.exe
+    name: WindowsSetup
+
+deploy: off
