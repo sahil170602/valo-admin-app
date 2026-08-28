@@ -2,22 +2,101 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
+// --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
+const getFormattedDate = (dateObj = new Date()) => {
+    const d = String(dateObj.getDate()).padStart(2, '0');
+    const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const y = dateObj.getFullYear();
+    return `${d}/${m}/${y}`;
+};
+
+const getFormattedTime = (dateObj = new Date()) => {
+    return dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+};
+
+const getFormattedDateForInput = (dateObj = new Date()) => {
+    const d = String(dateObj.getDate()).padStart(2, '0');
+    const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const y = dateObj.getFullYear();
+    return `${y}-${m}-${d}`;
+};
+
+// --- NORMALIZER (Fixes 1/8/2026 to 01/08/2026 for accurate sorting) ---
+const normalizeDateStr = (dStr) => {
+    if (!dStr) return null;
+    const parts = dStr.split('/');
+    if (parts.length === 3) {
+        if (parts[0] === '8' || parts[0] === '08') {
+            let y = parts[2];
+            if (y.length === 2) y = `20${y}`;
+            return `${parts[1].padStart(2, '0')}/${parts[0].padStart(2, '0')}/${y}`;
+        }
+        let y = parts[2];
+        if (y.length === 2) y = `20${y}`;
+        return `${parts[0].padStart(2, '0')}/${parts[1].padStart(2, '0')}/${y}`;
+    }
+    return dStr;
+};
+
+// --- IMAGE TO BASE64 HELPER ---
+const fileToBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = error => reject(error);
+});
+
+// --- CSV EXPORT LOGIC ---
+const exportCSV = (data, filename) => {
+    if (!data || data.length === 0) {
+        alert("No data available to export.");
+        return;
+    }
+    const headers = Object.keys(data[0]);
+    const csvRows = [];
+    csvRows.push(headers.join(','));
+    for (const row of data) {
+        const values = headers.map(header => {
+            const escaped = ('' + (row[header] ?? '')).replace(/"/g, '\\"');
+            return `"${escaped}"`;
+        });
+        csvRows.push(values.join(','));
+    }
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.setAttribute('hidden', '');
+    a.setAttribute('href', url);
+    a.setAttribute('download', filename);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+};
+
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
     const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('valo_admin_auth') === 'true');
 
     useEffect(() => {
-        const initOneSignal = async () => {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            if (window.plugins && window.plugins.OneSignal) {
-                window.plugins.OneSignal.initialize("3a830d21-fca2-4484-a905-84bb421754e1");
-                window.plugins.OneSignal.Notifications.requestPermission(true);
-                window.plugins.OneSignal.Notifications.addEventListener("foregroundWillDisplay", (event) => {
-                    event.getNotification().display(); 
-                });
-            }
+        const setupWebPush = async () => {
+            if (window.OneSignalInitialized) return; 
+            window.OneSignalInitialized = true;
+
+            window.OneSignalDeferred = window.OneSignalDeferred || [];
+            window.OneSignalDeferred.push(async function(OneSignal) {
+                try {
+                    await OneSignal.init({
+                        appId: "3a997ca5-9d8f-4e81-8943-907b81b9a577",
+                        safari_web_id: "web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65",
+                        notifyButton: { enable: false },
+                        allowLocalhostAsSecureOrigin: true,
+                    });
+                } catch (err) {
+                    console.log("OneSignal skipped: Only runs on valid domain.");
+                }
+            });
         };
-        initOneSignal();
+        setupWebPush();
     }, []);
 
     useEffect(() => {
@@ -40,7 +119,7 @@ function SplashScreen() {
             <div className="relative z-10 flex flex-col items-center">
                 <div className="w-28 h-28 bg-white/5 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] flex items-center justify-center shadow-2xl relative mb-8">
                     <div className="absolute inset-0 bg-cyan-500/20 blur-2xl opacity-50 rounded-[2.5rem]"></div>
-                    <img src={logoUrl} alt="Logo" className="w-28 h-28 object-contain drop-shadow-[0_0_15px_rgba(34,211,238,0.5)]" onError={(e) => { e.target.src = "splash.png" }} />
+                    <img src={logoUrl} alt="Logo" className="w-28 h-28 object-contain drop-shadow-[0_0_15px_rgba(34,211,238,0.5)]" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.style.display = 'none'; }} />
                 </div>
                 <h1 className="text-4xl font-black tracking-[0.2em] text-white text-center mb-2">VALO<span className="text-cyan-400"></span></h1>
                 <p className="text-gray-400 tracking-[0em] text-[18px] font-bold animate-pulse">Experience</p>
@@ -58,7 +137,7 @@ function AdminLogin({ onLogin }) {
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const currentPin = localStorage.getItem('valo_admin_pin') || '1234';
+        const currentPin = localStorage.getItem('valo_admin_pin') || '6748';
         if (pin === currentPin) {
             localStorage.setItem('valo_admin_auth', 'true');
             onLogin();
@@ -72,7 +151,7 @@ function AdminLogin({ onLogin }) {
         <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-4">
             <div className={`w-full max-w-sm bg-slate-800 border border-white/10 p-10 rounded-[3rem] shadow-2xl text-center transition-all ${error ? 'animate-shake border-red-500' : ''}`}>
                 <div className="w-28 h-28 bg-white/5 rounded-3xl mx-auto flex items-center justify-center mb-8 shadow-xl border border-white/5 relative">
-                     <img src={logoUrl} alt="Logo" className="w-28 h-28 object-contain" onError={(e) => { e.target.src = "./icon.png" }} />
+                     <img src={logoUrl} alt="Logo" className="w-28 h-28 object-contain" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.style.display = 'none'; }} />
                 </div>
                 <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">Access Locked</h2>
                 <p className="text-gray-500 text-xs mb-8 uppercase font-bold tracking-widest text-[10px]">Security Protocols Active</p>
@@ -87,7 +166,8 @@ function AdminLogin({ onLogin }) {
 
 // --- MAIN DASHBOARD ---
 function AdminDashboard({ onLogout }) {
-    const [activeTab, setActiveTab] = useState('create_bill'); 
+    const [activeTab, setActiveTab] = useState('orders'); 
+    const [opsTab, setOpsTab] = useState('staff');
     
     const [appName, setAppName] = useState(() => localStorage.getItem('valo_app_name') || 'VALO');
     const [alertTone, setAlertTone] = useState(() => localStorage.getItem('valo_alert_tone') || 'https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
@@ -97,12 +177,24 @@ function AdminDashboard({ onLogout }) {
     const [categories, setCategories] = useState([]);
     const [menuItems, setMenuItems] = useState([]);
     const [moments, setMoments] = useState([]);
+    const [inventoryItems, setInventoryItems] = useState([]);
+    const [expenses, setExpenses] = useState([]);
+    const [staffExpenses, setStaffExpenses] = useState([]);
+    const [missingItemsData, setMissingItemsData] = useState([]);
+  // Purchase States
+    const [purchasesData, setPurchasesData] = useState([]);
+    const [purchaseModal, setPurchaseModal] = useState({ open: false });
+    const [purchaseForm, setPurchaseForm] = useState({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash' });
+    const [purchaseShowSugg, setPurchaseShowSugg] = useState(false);
+    const [purchaseTabFilter, setPurchaseTabFilter] = useState('All');
+    const [selectedPurchaseItem, setSelectedPurchaseItem] = useState(null);
 
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [audioUnlocked, setAudioUnlocked] = useState(false);
     const [menuSearchQuery, setMenuSearchQuery] = useState(""); 
     
-    // Create Bill (POS) States
+    // Create Bill States
+    const [createBillModal, setCreateBillModal] = useState(false);
     const [billCustomerName, setBillCustomerName] = useState('');
     const [billCustomerPhone, setBillCustomerPhone] = useState('');
     const [billTableNo, setBillTableNo] = useState('Counter');
@@ -112,39 +204,121 @@ function AdminDashboard({ onLogout }) {
     const [billItemQty, setBillItemQty] = useState(1);
     const [showSuggestions, setShowSuggestions] = useState(false);
     const [selectedMenuId, setSelectedMenuId] = useState(null);
+    const [selectedInvId, setSelectedInvId] = useState(null);
+    const [billBarcode, setBillBarcode] = useState('');
     
     // Live Order Custom Item Form
     const [addingItemTo, setAddingItemTo] = useState(null);
-    const [customItemForm, setCustomItemForm] = useState({ name: '', qty: 1, price: '', menuId: null });
+    const [customItemForm, setCustomItemForm] = useState({ name: '', qty: 1, price: '', menuId: null, invId: null, isInv: false });
+
+    // Expense Management States
+    const [expenseDesc, setExpenseDesc] = useState('');
+    const [expenseAmount, setExpenseAmount] = useState('');
+    const [expenseMode, setExpenseMode] = useState('Cash');
+    const [expenseDateFilter, setExpenseDateFilter] = useState(() => getFormattedDateForInput());
+
+    // Barcode Scanning State
+    const [scanOrderId, setScanOrderId] = useState(null);
+    const [barcodeInput, setBarcodeInput] = useState('');
+    const barcodeInputRef = useRef(null);
 
     // Modals
     const [itemModal, setItemModal] = useState({ open: false, mode: 'add', data: null });
     const [catModal, setCatModal] = useState(false);
     const [momentModal, setMomentModal] = useState({ open: false, mode: 'add', data: null });
+    const [viewOrderDetails, setViewOrderDetails] = useState(null);
+    const [invModal, setInvModal] = useState({ open: false, mode: 'add', data: null }); 
+    const [editHistoryModal, setEditHistoryModal] = useState({ open: false, order: null, tempMethod: 'Cash' });
+
+    // New Modals
+    const [staffModal, setStaffModal] = useState({ open: false });
+    const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null });
+    const [staffShowSugg, setStaffShowSugg] = useState(false);
+    const [isCustomStaff, setIsCustomStaff] = useState(false);
+    const [activeStaff, setActiveStaff] = useState('');
+
+    const [missingModal, setMissingModal] = useState({ open: false });
+    const [missingForm, setMissingForm] = useState({ name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null });
+    const [missingShowSugg, setMissingShowSugg] = useState(false);
+    
     
     // Payment Modal State
-    const [adminPaymentModal, setAdminPaymentModal] = useState({ open: false, orderId: null });
+    const [adminPaymentModal, setAdminPaymentModal] = useState({ open: false, orderId: null, total: null });
+    const [isSplitMode, setIsSplitMode] = useState(false);
+    const [splitCash, setSplitCash] = useState('');
+    const [splitOnline, setSplitOnline] = useState('');
 
-    // Analytics & Transactions State
-    const [analyticsFilter, setAnalyticsFilter] = useState('Today'); // Today, Weekly, Monthly, Yearly, All
+    // Analytics, Transactions & Search States
+    const [analyticsFilter, setAnalyticsFilter] = useState('Today'); 
+    const [selectedRevenueCategory, setSelectedRevenueCategory] = useState(null);
+    const [analyticsCustomDate, setAnalyticsCustomDate] = useState(() => getFormattedDateForInput());
     const [transactionPage, setTransactionPage] = useState(1);
+    const [historyItemSearch, setHistoryItemSearch] = useState(''); 
+    const [historyItemForm, setHistoryItemForm] = useState({ name: '', price: '', qty: 1, menuId: null, invId: null, isInv: false });
+    const [historyItemSugg, setHistoryItemSugg] = useState(false);
+    const [inventorySearchQuery, setInventorySearchQuery] = useState(''); 
+    const [personalWaNumber, setPersonalWaNumber] = useState(() => localStorage.getItem('personal_wa_number') || '');
+    const [isEditingWa, setIsEditingWa] = useState(false);
+    const [purchaseSearchQuery, setPurchaseSearchQuery] = useState('');
+
+    // Cash Drawer States
+    const [drawerCashRecords, setDrawerCashRecords] = useState([]);
+    const [drawerModal, setDrawerModal] = useState(false);
+    const [pendingModal, setPendingModal] = useState(false);
+    const [drawerInput, setDrawerInput] = useState('');
+    const [drawerTakenOut, setDrawerTakenOut] = useState('');
+    const [drawerTakenBy, setDrawerTakenBy] = useState('');
 
     const [selectedTableFilter, setSelectedTableFilter] = useState('All');
     const audioRef = useRef(null);
 
+   // --- SMART LOW STOCK NOTIFICATION ENGINE ---
+    const prevInvRef = useRef({});
+    
     useEffect(() => {
-        const setupNativeNotifications = async () => {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            if (window.plugins && window.plugins.OneSignal) {
-                window.plugins.OneSignal.initialize("3a830d21-fca2-4484-a905-84bb421754e1");
-                window.plugins.OneSignal.Notifications.requestPermission(true);
-                window.plugins.OneSignal.Notifications.addEventListener("foregroundWillDisplay", (event) => {
-                    event.getNotification().display(); 
-                });
+        inventoryItems.forEach(item => {
+            const prevStock = prevInvRef.current[item.id];
+            
+            // If we have tracked this item before, and its stock JUST changed...
+            if (prevStock !== undefined && prevStock !== item.stock) {
+                // If it dropped to exactly 5 (or from 6 down to 5/4/3)
+                if (prevStock > 5 && item.stock <= 5 && item.stock > 2) {
+                    playAlert(); // Play beep sound
+                    if (Notification.permission === 'granted') {
+                        new Notification("⚠️ LOW STOCK ALERT", { body: `${item.name} is down to ${item.stock} units!`, icon: '/splash.png' });
+                    }
+                }
+                // If it dropped to exactly 2 (or lower)
+                else if (prevStock > 2 && item.stock <= 2) {
+                    playAlert(); // Play beep sound
+                    if (Notification.permission === 'granted') {
+                        new Notification("🚨 CRITICAL STOCK ALERT", { body: `${item.name} is critically low (${item.stock} units left)!`, icon: '/splash.png' });
+                    }
+                }
             }
-        };
-        setupNativeNotifications();
-    }, []);
+            
+            // Remember the current stock for the next time it updates
+            prevInvRef.current[item.id] = item.stock;
+        });
+    }, [inventoryItems]);
+
+    // Calculate unique staff totals dynamically
+    const staffTotals = staffExpenses.reduce((acc, curr) => {
+        acc[curr.staff_name] = (acc[curr.staff_name] || 0) + curr.total;
+        return acc;
+    }, {});
+    
+    const uniqueStaffNames = Object.keys(staffTotals).sort();
+
+    useEffect(() => {
+        if (activeTab === 'staff' && !activeStaff && uniqueStaffNames.length > 0) {
+            setActiveStaff(uniqueStaffNames[0]);
+        }
+    }, [activeTab, uniqueStaffNames, activeStaff]);
+
+    useEffect(() => {
+        if(scanOrderId && barcodeInputRef.current) barcodeInputRef.current.focus();
+    }, [scanOrderId, barcodeInput]);
 
     useEffect(() => {
         const unlockAudio = () => {
@@ -194,7 +368,26 @@ function AdminDashboard({ onLogout }) {
         
         const { data: moms } = await supabase.from('moments').select('*').order('id', { ascending: false });
         if(moms) setMoments(moms);
+
+        const { data: inv } = await supabase.from('inventory_items').select('*').order('name', { ascending: true });
+        if(inv) setInventoryItems(inv);
+
+        const { data: exp } = await supabase.from('expenses').select('*').order('timestamp', { ascending: false });
+        if(exp) setExpenses(exp);
+
+        const { data: se } = await supabase.from('staff_expenses').select('*').order('timestamp', { ascending: false });
+        if(se) setStaffExpenses(se);
+
+        const { data: mi } = await supabase.from('missing_items').select('*').order('timestamp', { ascending: false });
+        if(mi) setMissingItemsData(mi);
+
+        const { data: pur } = await supabase.from('stock_purchases').select('*').order('timestamp', { ascending: false });
+        if(pur) setPurchasesData(pur);
+
+        const { data: dc } = await supabase.from('drawer_cash').select('*').order('timestamp', { ascending: false });
+        if(dc) setDrawerCashRecords(dc);
     };
+
 
     useEffect(() => {
         fetchData();
@@ -204,6 +397,283 @@ function AdminDashboard({ onLogout }) {
         return () => { supabase.removeChannel(channel); stopAlert(); };
     }, []);
 
+    // -------------------------------------------------------------------------
+    // CRUD FUNCTIONS FOR MENU, CATEGORIES, MOMENTS & INVENTORY
+    // -------------------------------------------------------------------------
+
+    const handleSaveCategory = async (e) => {
+        e.preventDefault();
+        const form = new FormData(e.target);
+        const name = form.get('name');
+        const file = form.get('image');
+        
+        let imgBase64 = null;
+        if (file && file.size > 0) {
+            imgBase64 = await fileToBase64(file);
+        }
+
+        const { error } = await supabase.from('categories').insert([{ name, image: imgBase64 }]);
+        if (error) alert(error.message);
+        setCatModal(false);
+        fetchData();
+    };
+
+    const deleteCategory = async (id) => {
+        if(confirm('Delete this category?')) {
+            await supabase.from('categories').delete().eq('id', id);
+            fetchData();
+        }
+    };
+
+    const handleSaveItem = async (e) => {
+        e.preventDefault();
+        const form = new FormData(e.target);
+        
+        const payload = {
+            category_id: form.get('category'),
+            name: form.get('name'),
+            price: `₹${form.get('price')}`,
+            description: form.get('desc'),
+            in_stock: true,
+            is_special: false
+        };
+
+        const file = form.get('image');
+        if (file && file.size > 0) {
+            payload.img = await fileToBase64(file);
+        }
+
+        if (itemModal.mode === 'add') {
+            await supabase.from('menu_items').insert([payload]);
+        } else {
+            await supabase.from('menu_items').update(payload).eq('id', itemModal.data.id);
+        }
+        setItemModal({open: false, mode: 'add', data: null});
+        fetchData();
+    };
+
+    const deleteItem = async (id) => {
+        if(confirm('Delete this menu item?')) {
+            await supabase.from('menu_items').delete().eq('id', id);
+            fetchData();
+        }
+    };
+
+    const toggleSpecial = async (item) => {
+        await supabase.from('menu_items').update({ is_special: !item.is_special }).eq('id', item.id);
+        fetchData();
+    };
+
+    const toggleStock = async (item) => {
+        await supabase.from('menu_items').update({ in_stock: !item.in_stock }).eq('id', item.id);
+        fetchData();
+    };
+
+    const handleSaveMoment = async (e) => {
+        e.preventDefault();
+        const form = new FormData(e.target);
+        const payload = { caption: form.get('caption') };
+        
+        const file = form.get('image');
+        if (file && file.size > 0) {
+            payload.src = await fileToBase64(file);
+        }
+
+        if (momentModal.mode === 'add') {
+            await supabase.from('moments').insert([payload]);
+        } else {
+            await supabase.from('moments').update(payload).eq('id', momentModal.data.id);
+        }
+        setMomentModal({open: false, mode: 'add', data: null});
+        fetchData();
+    };
+
+    const deleteMoment = async (id) => {
+        if(confirm('Delete this moment?')) {
+            await supabase.from('moments').delete().eq('id', id);
+            fetchData();
+        }
+    };
+
+    const handleSaveInventory = async (e) => {
+        e.preventDefault();
+        const form = new FormData(e.target);
+        const payload = {
+            name: form.get('name'),
+            barcode: form.get('barcode'),
+            stock: Number(form.get('stock')),
+            price: Number(form.get('price'))
+        };
+        if (invModal.mode === 'add') {
+            await supabase.from('inventory_items').insert([payload]);
+        } else {
+            await supabase.from('inventory_items').update(payload).eq('id', invModal.data.id);
+        }
+        setInvModal({open: false, mode: 'add', data: null});
+        fetchData();
+    };
+
+    const deleteInventoryItem = async (id) => {
+        if(confirm('Delete this inventory item?')) {
+            await supabase.from('inventory_items').delete().eq('id', id);
+            fetchData();
+        }
+    };
+
+    // -------------------------------------------------------------------------
+    // NEW STAFF & MISSING ITEMS FUNCTIONS
+    // -------------------------------------------------------------------------
+
+    const handleSaveStaffExpense = async (e) => {
+        e.preventDefault();
+        if (!staffForm.staff_name || !staffForm.name || staffForm.qty < 1) return;
+        
+        const payload = {
+            staff_name: staffForm.staff_name,
+            item_name: staffForm.name,
+            qty: Number(staffForm.qty),
+            price: Number(staffForm.price),
+            total: Number(staffForm.qty) * Number(staffForm.price),
+            is_inv: staffForm.isInv,
+            inv_id: staffForm.invId,
+            date: getFormattedDate(),
+            time: getFormattedTime(),
+            timestamp: Date.now()
+        };
+
+        if (payload.is_inv && payload.inv_id) {
+            const invItem = inventoryItems.find(i => i.id === payload.inv_id);
+            if (invItem) {
+                if (invItem.stock < payload.qty) {
+                    alert("Not enough stock in inventory!");
+                    return;
+                }
+                await supabase.from('inventory_items').update({ stock: invItem.stock - payload.qty }).eq('id', invItem.id);
+            }
+        }
+
+        await supabase.from('staff_expenses').insert([payload]);
+        setStaffModal({ open: false });
+        setActiveStaff(payload.staff_name);
+        setStaffForm({ staff_name: payload.staff_name, name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null });
+        fetchData();
+    };
+
+    const deleteStaffExpense = async (id) => {
+        if(confirm('Remove this record? (Note: Stock is NOT refunded automatically)')) {
+            await supabase.from('staff_expenses').delete().eq('id', id);
+            fetchData();
+        }
+    };
+
+const handleSaveMissingItem = async (e) => {
+        e.preventDefault();
+        if (!missingForm.name || missingForm.qty < 1) return;
+        
+        const form = new FormData(e.target);
+        const recordType = form.get('type') || 'Missing';
+
+        const payload = {
+            item_name: missingForm.name,
+            type: recordType, // Saves whether it's Missing or Defective
+            qty: Number(missingForm.qty),
+            price: Number(missingForm.price),
+            total: Number(missingForm.qty) * Number(missingForm.price),
+            is_inv: missingForm.isInv,
+            inv_id: missingForm.invId,
+            date: getFormattedDate(),
+            time: getFormattedTime(),
+            timestamp: Date.now()
+        };
+
+        if (payload.is_inv && payload.inv_id) {
+            const invItem = inventoryItems.find(i => i.id === payload.inv_id);
+            if (invItem) {
+                if (invItem.stock < payload.qty) {
+                    alert("Not enough stock in inventory!");
+                    return;
+                }
+                await supabase.from('inventory_items').update({ stock: invItem.stock - payload.qty }).eq('id', invItem.id);
+            }
+        }
+
+        await supabase.from('missing_items').insert([payload]);
+        setMissingModal({ open: false });
+        setMissingForm({ name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null });
+        fetchData();
+    };
+
+    const deletePurchase = async (id) => {
+        if(confirm('Are you sure you want to delete this purchase record? (Note: This does not automatically reverse inventory stock or expense ledgers)')) {
+            await supabase.from('stock_purchases').delete().eq('id', id);
+            fetchData();
+        }
+    };
+
+   const handleSavePurchase = async (e) => {
+        e.preventDefault();
+        if (!purchaseForm.name || purchaseForm.qty < 1) return;
+        
+        const totalCost = Number(purchaseForm.qty) * Number(purchaseForm.price);
+
+        const payload = {
+            purchase_type: purchaseForm.type,
+            item_name: purchaseForm.name,
+            inv_id: purchaseForm.invId,
+            qty: Number(purchaseForm.qty),
+            unit_price: Number(purchaseForm.price),
+            total_cost: totalCost,
+            payment_mode: purchaseForm.mode,
+            date: getFormattedDate(),
+            time: getFormattedTime(),
+            timestamp: Date.now()
+        };
+
+        // 1. AUTO-INCREASE INVENTORY STOCK
+        if (payload.purchase_type === 'Inventory' && payload.inv_id) {
+            const invItem = inventoryItems.find(i => i.id === payload.inv_id);
+            if (invItem) {
+                const newStockAmount = Number(invItem.stock) + Number(payload.qty);
+                await supabase.from('inventory_items').update({ stock: newStockAmount }).eq('id', invItem.id);
+            }
+        }
+
+        // 2. LOG PURCHASE IN DATABASE
+        await supabase.from('stock_purchases').insert([payload]);
+
+        // 3. AUTO-LOG TO EXPENSE LEDGER
+        const newExpense = {
+            date: payload.date,
+            time: payload.time,
+            timestamp: payload.timestamp,
+            amount: totalCost,
+            description: `[Restock] ${payload.item_name} (Qty: ${payload.qty})`,
+            mode: payload.payment_mode
+        };
+        await supabase.from('expenses').insert([newExpense]);
+
+        setPurchaseModal({ open: false });
+        setPurchaseForm({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash' });
+        fetchData();
+        alert("Stock increased and purchase logged successfully!");
+    };
+
+    const generateItemNamesString = (itemsObj, customItemsArr) => {
+        let names = [];
+        if (itemsObj) {
+            Object.entries(itemsObj).forEach(([id, qty]) => {
+                const mItem = menuItems.find(i => i.id === parseInt(id));
+                if (mItem) names.push(`${mItem.name} x${qty}`);
+            });
+        }
+        if (customItemsArr) {
+            customItemsArr.forEach(ci => {
+                names.push(`${ci.name} x${ci.qty}`);
+            });
+        }
+        return names.join(', ');
+    };
+
     const updateOrder = async (id, updates) => {
         const newOrders = orders.map(o => o.id === id ? { ...o, ...updates } : o);
         setOrders(newOrders);
@@ -212,34 +682,119 @@ function AdminDashboard({ onLogout }) {
         const { data: current } = await supabase.from('orders').select('order_details, total, status').eq('id', id).single();
         if(current) {
             const newDetails = { ...current.order_details, ...updates };
-            
             const dbPayload = { 
                 status: updates.status || current.status, 
-                order_details: newDetails 
+                order_details: newDetails,
+                item_names: generateItemNamesString(newDetails.items, newDetails.customItems) 
             };
-
             if (updates.total !== undefined) {
                 dbPayload.total = updates.total;
             }
-
             await supabase.from('orders').update(dbPayload).eq('id', id);
         }
     };
 
-    const deleteOrder = async (id) => { 
-        if(confirm('Are you sure you want to permanently delete this order?')) {
-            const { error } = await supabase.from('orders').delete().eq('id', id); 
-            if (error) alert("Error deleting order: " + error.message);
-            else setOrders(prev => prev.filter(o => o.id !== id));
+    const handleHistoryAddItem = async () => {
+        if (!historyItemForm.name || !historyItemForm.price || historyItemForm.qty < 1) return;
+
+        const order = editHistoryModal.order;
+        const qty = Number(historyItemForm.qty);
+        const price = Number(historyItemForm.price);
+        
+        let updatedRegularItems = { ...(order.items || {}) };
+        let updatedCustomItems = [...(order.customItems || [])];
+
+        if (historyItemForm.menuId) {
+            updatedRegularItems[historyItemForm.menuId] = (updatedRegularItems[historyItemForm.menuId] || 0) + qty;
+        } else if (historyItemForm.isInv && historyItemForm.invId) {
+            const invItem = inventoryItems.find(i => i.id === historyItemForm.invId);
+            if (invItem) {
+                if (invItem.stock < qty) {
+                    alert("Not enough stock in inventory!");
+                    return;
+                }
+                const invIdKey = `inv_${historyItemForm.invId}`;
+                const existingIdx = updatedCustomItems.findIndex(c => c.id === invIdKey);
+                if (existingIdx >= 0) {
+                    updatedCustomItems[existingIdx].qty += qty;
+                } else {
+                    updatedCustomItems.push({
+                        id: invIdKey, name: historyItemForm.name, qty: qty, price: price, isCustom: true, isInv: true, invId: historyItemForm.invId
+                    });
+                }
+                await supabase.from('inventory_items').update({ stock: invItem.stock - qty }).eq('id', invItem.id);
+            }
+        } else {
+            updatedCustomItems.push({
+                id: `custom_${Date.now()}`, name: historyItemForm.name, qty: qty, price: price, isCustom: true
+            });
         }
+
+        const newTotal = Number(order.total || 0) + (qty * price);
+
+        // Update the database instantly so the item is saved securely
+        await updateOrder(order.id, {
+            items: updatedRegularItems,
+            customItems: updatedCustomItems,
+            total: newTotal
+        });
+
+        // Update the visual modal instantly
+        setEditHistoryModal(prev => ({
+            ...prev,
+            order: { ...prev.order, items: updatedRegularItems, customItems: updatedCustomItems, total: newTotal }
+        }));
+
+        setHistoryItemForm({ name: '', price: '', qty: 1, menuId: null, invId: null, isInv: false });
     };
 
-    const handleAdminMarkPaid = async (method) => {
-        if (adminPaymentModal.orderId) {
-            await updateOrder(adminPaymentModal.orderId, { paymentStatus: 'Paid', paymentMethod: method });
+    const handleSaveHistoryEdit = async (e) => {
+        e.preventDefault();
+        const order = editHistoryModal.order;
+        const form = new FormData(e.target);
+        
+        const newTotal = Number(form.get('total'));
+        const newMethod = form.get('paymentMethod');
+        const newStatus = form.get('status');
+        
+        let splitAmounts = null;
+        if (newMethod === 'Split') {
+            const c = Number(form.get('splitCash'));
+            const o = Number(form.get('splitOnline'));
+            if (c + o !== newTotal) {
+                alert(`Split amounts (₹${c + o}) must exactly equal the Total Amount (₹${newTotal})`);
+                return;
+            }
+            splitAmounts = { cash: c, online: o };
         }
-        setAdminPaymentModal({ open: false, orderId: null });
+
+        await updateOrder(order.id, {
+            total: newTotal,
+            paymentMethod: newMethod,
+            status: newStatus,
+            splitAmounts: splitAmounts,
+            paymentStatus: newStatus === 'Cancelled' ? 'Pending' : 'Paid'
+        });
+
+        alert("Order Successfully Updated!");
+        setEditHistoryModal({ open: false, order: null, tempMethod: 'Cash' });
+        fetchData(); 
     };
+
+   const handleAdminMarkPaid = async (method, splitAmounts = null) => {
+    if (adminPaymentModal.orderId) {
+        const pStatus = method === 'Pending' ? 'Pending' : 'Paid';
+        const finalMethod = method === 'Pending' ? 'Cash' : method;
+        
+        const updates = { paymentStatus: pStatus, paymentMethod: finalMethod };
+        if (splitAmounts) {
+            updates.splitAmounts = splitAmounts;
+        }
+        await updateOrder(adminPaymentModal.orderId, updates);
+    }
+    setAdminPaymentModal({ open: false, orderId: null, total: null });
+    setIsSplitMode(false);
+};
 
     const toggleItemReady = async (order, itemKey) => {
         const currentStatuses = order.itemStatuses || {};
@@ -248,7 +803,87 @@ function AdminDashboard({ onLogout }) {
         await updateOrder(order.id, { itemStatuses: updatedStatuses });
     };
 
-    // --- LIVE ORDER ITEM QTY EDITOR ---
+    const handleBarcodeSubmit = async (e) => {
+        e.preventDefault();
+        if(!barcodeInput.trim()) return;
+
+        const item = inventoryItems.find(i => i.barcode === barcodeInput.trim());
+        if(!item) {
+            alert("Barcode not found in inventory!");
+            setBarcodeInput('');
+            return;
+        }
+        if(item.stock <= 0) {
+            alert("This item is out of stock!");
+            setBarcodeInput('');
+            return;
+        }
+
+        const order = orders.find(o => o.id === scanOrderId);
+        if(!order) return;
+
+        let updatedCustomItems = [...(order.customItems || [])];
+        const invIdKey = `inv_${item.id}`;
+        const existingIdx = updatedCustomItems.findIndex(c => c.id === invIdKey);
+
+        if(existingIdx >= 0) {
+            updatedCustomItems[existingIdx].qty += 1;
+        } else {
+            updatedCustomItems.push({
+                id: invIdKey,
+                name: item.name,
+                qty: 1,
+                price: item.price,
+                isInv: true,
+                invId: item.id
+            });
+        }
+
+        const newTotal = Number(order.total || 0) + item.price;
+        setBarcodeInput(''); 
+
+        await updateOrder(order.id, {
+            customItems: updatedCustomItems,
+            total: newTotal
+        });
+        await supabase.from('inventory_items').update({ stock: item.stock - 1 }).eq('id', item.id);
+    };
+
+    const handleBillBarcodeSubmit = (e) => {
+        e.preventDefault();
+        if(!billBarcode.trim()) return;
+        const item = inventoryItems.find(i => i.barcode === billBarcode.trim());
+        if(!item) {
+            alert("Barcode not found in inventory!");
+            setBillBarcode('');
+            return;
+        }
+        if(item.stock <= 0) {
+            alert("Item out of stock!");
+            setBillBarcode('');
+            return;
+        }
+        
+        const existingIdx = billItemsList.findIndex(b => b.invId === item.id);
+        if (existingIdx >= 0) {
+            const newList = [...billItemsList];
+            newList[existingIdx].qty += 1;
+            setBillItemsList(newList);
+        } else {
+            const newItem = {
+                uniqueId: Date.now(),
+                menuId: null,
+                invId: item.id,
+                isInv: true,
+                name: item.name,
+                price: item.price,
+                qty: 1
+            };
+            setBillItemsList(prev => [...prev, newItem]);
+        }
+        setBillBarcode('');
+    };
+
     const updateLiveOrderItemQty = async (orderId, itemKey, isCustom, newQty) => {
         if (newQty < 1) return;
         
@@ -260,20 +895,32 @@ function AdminDashboard({ onLogout }) {
         let priceDiff = 0;
 
         if (isCustom) {
-            updatedCustomItems = updatedCustomItems.map(cItem => {
-                if (cItem.id === itemKey) {
-                    priceDiff = (newQty - cItem.qty) * Number(cItem.price);
-                    return { ...cItem, qty: newQty };
+            const cItemIndex = updatedCustomItems.findIndex(c => c.id === itemKey);
+            if (cItemIndex >= 0) {
+                const cItem = updatedCustomItems[cItemIndex];
+                const diff = newQty - cItem.qty;
+
+                if (itemKey.startsWith('inv_') && cItem.invId) {
+                    const invItem = inventoryItems.find(i => i.id === cItem.invId);
+                    if(invItem) {
+                        if (diff > 0 && invItem.stock < diff) {
+                            alert("Not enough stock in inventory!");
+                            return;
+                        }
+                        await supabase.from('inventory_items').update({ stock: invItem.stock - diff }).eq('id', invItem.id);
+                    }
                 }
-                return cItem;
-            });
+
+                priceDiff = diff * Number(cItem.price);
+                updatedCustomItems[cItemIndex] = { ...cItem, qty: newQty };
+            }
         } else {
             const menuId = itemKey.replace('menu_', '');
             const oldQty = updatedRegularItems[menuId] || 1;
             updatedRegularItems[menuId] = newQty;
             
             const mItem = menuItems.find(i => i.id === parseInt(menuId));
-            const price = mItem ? parseInt(mItem.price.replace(/[^0-9]/g, '')) : 0;
+            const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
             priceDiff = (newQty - oldQty) * price;
         }
 
@@ -286,7 +933,6 @@ function AdminDashboard({ onLogout }) {
         });
     };
 
-    // --- REMOVE LIVE ORDER ITEM LOGIC ---
     const removeLiveOrderItem = async (orderId, itemKey, isCustom) => {
         if (!confirm('Are you sure you want to remove this item from the order?')) return;
         
@@ -300,6 +946,12 @@ function AdminDashboard({ onLogout }) {
         if (isCustom) {
             const cItem = updatedCustomItems.find(c => c.id === itemKey);
             if (cItem) {
+                if (itemKey.startsWith('inv_') && cItem.invId) {
+                    const invItem = inventoryItems.find(i => i.id === cItem.invId);
+                    if(invItem) {
+                        await supabase.from('inventory_items').update({ stock: invItem.stock + cItem.qty }).eq('id', invItem.id);
+                    }
+                }
                 priceDiff = -(Number(cItem.qty) * Number(cItem.price));
                 updatedCustomItems = updatedCustomItems.filter(c => c.id !== itemKey);
             }
@@ -307,13 +959,12 @@ function AdminDashboard({ onLogout }) {
             const menuId = itemKey.replace('menu_', '');
             const oldQty = updatedRegularItems[menuId] || 0;
             const mItem = menuItems.find(i => i.id === parseInt(menuId));
-            const price = mItem ? parseInt(mItem.price.replace(/[^0-9]/g, '')) : 0;
+            const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
             priceDiff = -(oldQty * price);
             delete updatedRegularItems[menuId];
         }
 
         const newTotal = Math.max(0, Number(order.total || 0) + priceDiff);
-
         const updatedStatuses = { ...(order.itemStatuses || {}) };
         delete updatedStatuses[itemKey];
 
@@ -325,7 +976,6 @@ function AdminDashboard({ onLogout }) {
         });
     };
 
-    // --- ADD ITEM TO EXISTING LIVE ORDER LOGIC ---
     const handleAddCustomItem = async (orderId) => {
         const order = orders.find(o => o.id === orderId);
         if (!order || !customItemForm.name || !customItemForm.price) return;
@@ -338,12 +988,37 @@ function AdminDashboard({ onLogout }) {
 
         if (customItemForm.menuId) {
             updatedRegularItems[customItemForm.menuId] = (updatedRegularItems[customItemForm.menuId] || 0) + qty;
+        } else if (customItemForm.isInv && customItemForm.invId) {
+            const invItem = inventoryItems.find(i => i.id === customItemForm.invId);
+            if (invItem) {
+                if (invItem.stock < qty) {
+                    alert("Not enough stock in inventory!");
+                    return;
+                }
+                const invIdKey = `inv_${customItemForm.invId}`;
+                const existingIdx = updatedCustomItems.findIndex(c => c.id === invIdKey);
+                if (existingIdx >= 0) {
+                    updatedCustomItems[existingIdx].qty += qty;
+                } else {
+                    updatedCustomItems.push({
+                        id: invIdKey,
+                        name: customItemForm.name,
+                        qty: qty,
+                        price: price,
+                        isCustom: true,
+                        isInv: true,
+                        invId: customItemForm.invId
+                    });
+                }
+                await supabase.from('inventory_items').update({ stock: invItem.stock - qty }).eq('id', invItem.id);
+            }
         } else {
             const newItem = {
                 id: `custom_${Date.now()}`,
                 name: customItemForm.name,
                 qty: qty,
-                price: price
+                price: price,
+                isCustom: true
             };
             updatedCustomItems = [...updatedCustomItems, newItem];
         }
@@ -357,13 +1032,19 @@ function AdminDashboard({ onLogout }) {
         });
         
         setAddingItemTo(null);
-        setCustomItemForm({ name: '', qty: 1, price: '', menuId: null });
+        setCustomItemForm({ name: '', qty: 1, price: '', menuId: null, invId: null, isInv: false });
     };
 
-    const handleSelectSuggestion = (item) => {
+    const handleSelectSuggestion = (item, isInv = false) => {
         setBillItemSearch(item.name);
-        setBillItemPrice(parseInt(item.price.replace(/[^0-9]/g, '')) || 0);
-        setSelectedMenuId(item.id);
+        setBillItemPrice(parseInt(String(item.price).replace(/[^0-9]/g, '')) || 0);
+        if (isInv) {
+            setSelectedMenuId(null);
+            setSelectedInvId(item.id);
+        } else {
+            setSelectedMenuId(item.id);
+            setSelectedInvId(null);
+        }
         setShowSuggestions(false);
     };
 
@@ -372,6 +1053,8 @@ function AdminDashboard({ onLogout }) {
         const newItem = {
             uniqueId: Date.now(),
             menuId: selectedMenuId, 
+            invId: selectedInvId,
+            isInv: !!selectedInvId,
             name: billItemSearch,
             price: Number(billItemPrice),
             qty: Number(billItemQty)
@@ -382,6 +1065,7 @@ function AdminDashboard({ onLogout }) {
         setBillItemPrice('');
         setBillItemQty(1);
         setSelectedMenuId(null);
+        setSelectedInvId(null);
         setShowSuggestions(false);
     };
 
@@ -392,7 +1076,6 @@ function AdminDashboard({ onLogout }) {
         ));
     };
 
-    // --- SMART AUTO-MERGE POS LOGIC ---
     const handleCreateAndPrintBill = async () => {
         const regularItems = {};
         const customItems = [];
@@ -404,55 +1087,58 @@ function AdminDashboard({ onLogout }) {
                 regularItems[item.menuId] = (regularItems[item.menuId] || 0) + item.qty;
             } else {
                 customItems.push({
-                    id: `custom_${Date.now()}_${Math.random()}`,
+                    id: item.isInv ? `inv_${item.invId}` : `custom_${Date.now()}_${Math.random()}`,
                     name: item.name,
                     qty: item.qty,
-                    price: item.price
+                    price: item.price,
+                    isCustom: true,
+                    isInv: item.isInv || false,
+                    invId: item.invId || null
                 });
             }
         });
 
-        // Search for an existing live order to merge into
+        // Deduct inventory stock for POS created bills
+        for (const item of billItemsList) {
+            if (item.isInv && item.invId) {
+                const invItem = inventoryItems.find(i => i.id === item.invId);
+                if (invItem) {
+                    await supabase.from('inventory_items').update({ stock: invItem.stock - item.qty }).eq('id', invItem.id);
+                }
+            }
+        }
+
         let existingOrder = orders.find(o => {
             const isActive = ['Received', 'Preparing', 'Ready'].includes(o.status);
             if (!isActive) return false;
-
             const isSameTable = billTableNo && String(billTableNo).toLowerCase() !== 'counter' && String(o.tableNo).toLowerCase() === String(billTableNo).toLowerCase();
             const inputPhone = billCustomerPhone ? String(billCustomerPhone).trim() : null;
             const orderPhone = o.customer?.phone ? String(o.customer.phone).trim() : null;
             const isSamePhone = inputPhone && orderPhone && inputPhone === orderPhone;
-
             return isSameTable || isSamePhone;
         });
 
         if (existingOrder) {
             const { data: dbOrder } = await supabase.from('orders').select('*').eq('id', existingOrder.id).single();
-            
             if (dbOrder) {
                 const orderDetails = dbOrder.order_details || {};
                 const mergedRegularItems = { ...(orderDetails.items || {}) };
-                
                 Object.entries(regularItems).forEach(([id, qty]) => {
                     mergedRegularItems[id] = (mergedRegularItems[id] || 0) + qty;
                 });
-
                 const mergedCustomItems = [...(orderDetails.customItems || []), ...customItems];
                 const mergedTotal = Number(dbOrder.total || 0) + addedTotal;
 
-                const updatedDetails = {
-                    ...orderDetails,
-                    items: mergedRegularItems,
-                    customItems: mergedCustomItems
-                };
+                const updatedDetails = { ...orderDetails, items: mergedRegularItems, customItems: mergedCustomItems };
 
                 const { error } = await supabase.from('orders').update({
                     total: mergedTotal,
-                    order_details: updatedDetails
+                    order_details: updatedDetails,
+                    item_names: generateItemNamesString(mergedRegularItems, mergedCustomItems)
                 }).eq('id', dbOrder.id);
 
-                if (error) {
-                    alert("Error merging bill.");
-                } else {
+                if (error) alert("Error merging bill.");
+                else {
                     alert(`Successfully merged into active Order #${dbOrder.id}`);
                     printBill({ ...updatedDetails, id: dbOrder.id, status: dbOrder.status, tableNo: dbOrder.table_no, total: mergedTotal });
                     resetPOS();
@@ -464,9 +1150,10 @@ function AdminDashboard({ onLogout }) {
                 table_no: billTableNo || 'Counter',
                 total: addedTotal,
                 customer_phone: billCustomerPhone || 'Walk-in',
+                item_names: generateItemNamesString(regularItems, customItems),
                 order_details: {
-                    date: new Date().toLocaleDateString(),
-                    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    date: getFormattedDate(), // ALWAYS DD/MM/YYYY
+                    time: getFormattedTime(),
                     timestamp: Date.now(),
                     items: regularItems,
                     customItems: customItems,
@@ -478,10 +1165,8 @@ function AdminDashboard({ onLogout }) {
             };
 
             const { data, error } = await supabase.from('orders').insert([orderPayload]).select();
-            
-            if (error) {
-                alert("Error creating bill.");
-            } else {
+            if (error) alert("Error creating bill.");
+            else {
                 if (data && data.length > 0) {
                      const newOrder = { ...data[0].order_details, id: data[0].id, status: data[0].status, tableNo: data[0].table_no, total: data[0].total };
                      printBill(newOrder); 
@@ -496,10 +1181,9 @@ function AdminDashboard({ onLogout }) {
         setBillCustomerPhone('');
         setBillTableNo('Counter');
         setBillItemsList([]);
-        setActiveTab('orders');
+        setCreateBillModal(false);
     };
 
-    // --- PRINT BILL LOGIC ---
     const printBill = (order) => {
         const iframe = document.createElement('iframe');
         iframe.style.display = 'none';
@@ -515,7 +1199,7 @@ function AdminDashboard({ onLogout }) {
             const item = menuItems.find(i => i.id === parseInt(id));
             const name = item ? item.name : 'Deleted Item';
             const priceStr = item ? item.price : '₹0';
-            const numericPrice = parseInt(priceStr.replace(/[^0-9]/g, '')) || 0;
+            const numericPrice = parseInt(String(priceStr).replace(/[^0-9]/g, '')) || 0;
             const lineTotal = numericPrice * Number(qty);
             return `<tr><td class="qty">${qty}x</td><td class="item"><span>${name}</span><div style="font-size: 9px; opacity: 0.85;">@ ${priceStr}</div></td><td class="amount" style="text-align: right;">₹${lineTotal}</td></tr>`;
         }).join('');
@@ -523,17 +1207,39 @@ function AdminDashboard({ onLogout }) {
         if (customItems.length > 0) {
             itemsHtml += customItems.map(cItem => {
                 const lineTotal = cItem.price * cItem.qty;
-                return `<tr><td class="qty">${cItem.qty}x</td><td class="item"><span>${cItem.name} *</span><div style="font-size: 9px; opacity: 0.85;">@ ₹${cItem.price}</div></td><td class="amount" style="text-align: right;">₹${lineTotal}</td></tr>`;
+                return `<tr><td class="qty">${cItem.qty}x</td><td class="item"><span>${cItem.name} ${cItem.isInv ? '📦' : '*'}</span><div style="font-size: 9px; opacity: 0.85;">@ ₹${cItem.price}</div></td><td class="amount" style="text-align: right;">₹${lineTotal}</td></tr>`;
             }).join('');
         }
+
+        const paymentDisplay = order.paymentStatus === 'Paid' 
+            ? `Paid (${order.paymentMethod === 'Split' ? 'Split - Cash: ₹' + order.splitAmounts?.cash + ', Online: ₹' + order.splitAmounts?.online : (order.paymentMethod || 'Cash')})`
+            : 'Pending';
 
         const content = `
             <!DOCTYPE html>
             <html>
             <head>
                 <title>Print Bill - Order #${order.displayId || order.id}</title>
-                <style media="print">@page { size: 58mm auto; margin: 0; } html, body { margin: 0; padding: 0; background: #fff; } .receipt-container { width: 58mm; padding: 3mm; color: #000; font-family: Courier New, monospace; font-size: 11px; box-sizing: border-box; font-weight: 900 !important; } .receipt-container * { font-weight: 900 !important; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }</style>
-                <style>.receipt-container { width: 58mm; padding: 3mm; background: #fff; color: #000; font-family: Courier New, monospace; font-size: 11px; line-height: 1.35; box-sizing: border-box; font-weight: 900 !important; } .receipt-container * { font-weight: 900 !important; } .center { text-align: center; } .bold { font-weight: 900 !important; } .divider { border-top: 1px dashed #000; margin: 6px 0; } .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; } table { width: 100%; border-collapse: collapse; } td, th { vertical-align: top; padding: 2px 0; } .qty { width: 15%; } .item { width: 55%; word-break: break-word; } .amount { width: 30%; text-align: right; }</style>
+                <style media="print">
+                    @page { size: 48mm auto; margin: 0; } 
+                    html, body { margin: 0; padding: 0; background: #fff; height: auto; } 
+                    .receipt-container { width: 48mm; padding: 2mm 2mm 5mm 2mm; color: #000; font-family: Courier New, monospace; font-size: 11px; box-sizing: border-box; font-weight: 900 !important; margin: 0; } 
+                    .receipt-container * { font-weight: 900 !important; } 
+                    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                </style>
+                <style>
+                    .receipt-container { width: 48mm; padding: 2mm 2mm 5mm 2mm; background: #fff; color: #000; font-family: Courier New, monospace; font-size: 11px; line-height: 1.35; box-sizing: border-box; font-weight: 900 !important; margin: 0; } 
+                    .receipt-container * { font-weight: 900 !important; } 
+                    .center { text-align: center; } 
+                    .bold { font-weight: 900 !important; } 
+                    .divider { border-top: 1px dashed #000; margin: 6px 0; } 
+                    .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; } 
+                    table { width: 100%; border-collapse: collapse; } 
+                    td, th { vertical-align: top; padding: 2px 0; } 
+                    .qty { width: 15%; } 
+                    .item { width: 55%; break-inside: avoid; word-break: break-word; } 
+                    .amount { width: 30%; text-align: right; }
+                </style>
             </head>
             <body>
                 <div class="receipt-container">
@@ -542,8 +1248,8 @@ function AdminDashboard({ onLogout }) {
                     <div class="divider"></div>
                     <div class="row"><span>Order</span><span>#${order.displayId || order.id}</span></div>
                     <div class="row"><span>Table</span><span>${order.tableNo}</span></div>
-                    <div class="row"><span>Date</span><span>${order.date || new Date().toLocaleDateString()}</span></div>
-                    <div class="row"><span>Time</span><span>${order.time || new Date().toLocaleTimeString()}</span></div>
+                    <div class="row"><span>Date</span><span>${order.date}</span></div>
+                    <div class="row"><span>Time</span><span>${order.time}</span></div>
                     ${order.customer?.name && order.customer.name !== 'Walk-in' ? `<div class="row"><span>Name</span><span>${order.customer.name}</span></div>` : ''}
                     ${order.customer?.phone && order.customer.phone !== 'Walk-in' ? `<div class="row"><span>Phone</span><span>${order.customer.phone}</span></div>` : ''}
                     <div class="divider"></div>
@@ -551,7 +1257,7 @@ function AdminDashboard({ onLogout }) {
                     <div class="divider"></div>
                     <div class="row"><span>Total Items</span><span>${totalQty}</span></div>
                     <div class="row"><span>Grand Total</span><span>₹${order.total}</span></div>
-                    <div class="row" style="font-size: 10px; margin-top: 4px;"><span>Payment Status</span><span>${order.paymentStatus === 'Paid' ? `Paid (${order.paymentMethod || 'Cash'})` : 'Pending'}</span></div>
+                    <div class="row" style="font-size: 10px; margin-top: 4px;"><span>Payment Status</span><span>${paymentDisplay}</span></div>
                     <div class="divider"></div>
                     <div class="center">Thank You! Visit Again.</div>
                     <div class="center" style="font-size: 9px; margin-top: 4px;">Printed via Valo Ecosystem</div>
@@ -560,11 +1266,21 @@ function AdminDashboard({ onLogout }) {
             </html>
         `;
 
-        iframe.contentWindow.document.open(); iframe.contentWindow.document.write(content); iframe.contentWindow.document.close();
-        setTimeout(() => { iframe.contentWindow.focus(); iframe.contentWindow.print(); setTimeout(() => { document.body.removeChild(iframe); }, 2000); }, 500);
+        const printWin = window.open('', '_blank', 'width=400,height=600');
+        if (printWin) {
+            printWin.document.open();
+            printWin.document.write(content);
+            printWin.document.close();
+            printWin.focus();
+            setTimeout(() => {
+                printWin.print();
+                printWin.close();
+            }, 500);
+        } else {
+            alert("Pop-up blocked! Please allow pop-ups for this website in your browser settings.");
+        }
     };
 
-    // --- WHATSAPP PDF GENERATION & SHARE LOGIC ---
     const sendWhatsAppPDF = async (order, e) => {
         const btn = e.currentTarget;
         const originalHtml = btn.innerHTML;
@@ -572,7 +1288,6 @@ function AdminDashboard({ onLogout }) {
         btn.disabled = true;
 
         try {
-            // 1. Load html2pdf dynamically if not present
             if (!window.html2pdf) {
                 const script = document.createElement('script');
                 script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
@@ -580,7 +1295,6 @@ function AdminDashboard({ onLogout }) {
                 await new Promise((resolve) => { script.onload = resolve; });
             }
 
-            // 2. Build the HTML template
             const itemsArr = Object.entries(order.items || {});
             const customItems = order.customItems || [];
             let totalQty = itemsArr.reduce((sum, [id, qty]) => sum + Number(qty), 0);
@@ -590,7 +1304,7 @@ function AdminDashboard({ onLogout }) {
                 const item = menuItems.find(i => i.id === parseInt(id));
                 const name = item ? item.name : 'Item';
                 const priceStr = item ? item.price : '₹0';
-                const numericPrice = parseInt(priceStr.replace(/[^0-9]/g, '')) || 0;
+                const numericPrice = parseInt(String(priceStr).replace(/[^0-9]/g, '')) || 0;
                 const lineTotal = numericPrice * Number(qty);
                 return `<tr><td style="padding: 6px 0; border-bottom: 1px solid #ddd;">${qty}x</td><td style="padding: 6px 0; border-bottom: 1px solid #ddd;">${name}<br><span style="font-size:10px;color:#666;">@ ${priceStr}</span></td><td style="padding: 6px 0; text-align:right; border-bottom: 1px solid #ddd;">₹${lineTotal}</td></tr>`;
             }).join('');
@@ -598,11 +1312,14 @@ function AdminDashboard({ onLogout }) {
             if (customItems.length > 0) {
                 itemsHtml += customItems.map(cItem => {
                     const lineTotal = cItem.price * cItem.qty;
-                    return `<tr><td style="padding: 6px 0; border-bottom: 1px solid #ddd;">${cItem.qty}x</td><td style="padding: 6px 0; border-bottom: 1px solid #ddd;">${cItem.name} *<br><span style="font-size:10px;color:#666;">@ ₹${cItem.price}</span></td><td style="padding: 6px 0; text-align:right; border-bottom: 1px solid #ddd;">₹${lineTotal}</td></tr>`;
+                    return `<tr><td style="padding: 6px 0; border-bottom: 1px solid #ddd;">${cItem.qty}x</td><td style="padding: 6px 0; border-bottom: 1px solid #ddd;">${cItem.name} ${cItem.isInv ? '📦' : '*'}<br><span style="font-size:10px;color:#666;">@ ₹${cItem.price}</span></td><td style="padding: 6px 0; text-align:right; border-bottom: 1px solid #ddd;">₹${lineTotal}</td></tr>`;
                 }).join('');
             }
 
-            // Create temporary hidden container for the PDF
+            const paymentDisplay = order.paymentStatus === 'Paid' 
+                ? `Paid (${order.paymentMethod === 'Split' ? 'Split - Cash: ₹' + order.splitAmounts?.cash + ', Online: ₹' + order.splitAmounts?.online : (order.paymentMethod || 'Cash')})`
+                : 'Pending';
+
             const container = document.createElement('div');
             container.style.position = 'absolute';
             container.style.left = '-9999px';
@@ -614,7 +1331,7 @@ function AdminDashboard({ onLogout }) {
                     </div>
                     <div style="margin-bottom: 20px; font-size: 13px; line-height: 1.6;">
                         <div style="display:flex; justify-content:space-between;"><strong>Order ID:</strong> <span>#${order.displayId || order.id}</span></div>
-                        <div style="display:flex; justify-content:space-between;"><strong>Date:</strong> <span>${order.date || new Date().toLocaleDateString()} ${order.time || ''}</span></div>
+                        <div style="display:flex; justify-content:space-between;"><strong>Date:</strong> <span>${order.date} ${order.time || ''}</span></div>
                         <div style="display:flex; justify-content:space-between;"><strong>Customer:</strong> <span>${order.customer?.name || 'Walk-in'}</span></div>
                         <div style="display:flex; justify-content:space-between;"><strong>Phone:</strong> <span>${order.customer?.phone || 'N/A'}</span></div>
                     </div>
@@ -631,7 +1348,7 @@ function AdminDashboard({ onLogout }) {
                     <div style="font-size: 14px; margin-bottom: 20px;">
                         <div style="display:flex; justify-content:space-between; margin-bottom: 5px;"><span>Total Items:</span> <span>${totalQty}</span></div>
                         <div style="display:flex; justify-content:space-between; font-weight: 900; font-size: 18px;"><span>Grand Total:</span> <span>₹${order.total}</span></div>
-                        <div style="display:flex; justify-content:space-between; margin-top: 5px; font-size:12px; color:#555;"><span>Payment:</span> <span>${order.paymentStatus === 'Paid' ? `Paid (${order.paymentMethod || 'Cash'})` : 'Pending'}</span></div>
+                        <div style="display:flex; justify-content:space-between; margin-top: 5px; font-size:12px; color:#555;"><span>Payment:</span> <span>${paymentDisplay}</span></div>
                     </div>
                     <div style="text-align: center; font-size: 12px; color: #777; border-top: 1px dashed #ccc; padding-top: 15px;">
                         Thank you for visiting Valo Hotel!
@@ -640,39 +1357,43 @@ function AdminDashboard({ onLogout }) {
             `;
             document.body.appendChild(container);
 
-            // 3. Generate PDF Blob
             const opt = {
                 margin: 5,
-                filename: `Valo_Order_${order.id}.pdf`,
+                filename: `Valo_Order_${order.displayId || order.id}.pdf`,
                 image: { type: 'jpeg', quality: 0.98 },
                 html2canvas: { scale: 2 },
                 jsPDF: { unit: 'mm', format: 'a5', orientation: 'portrait' }
             };
 
             const pdfBlob = await window.html2pdf().from(container.children[0]).set(opt).output('blob');
-            const file = new File([pdfBlob], `Valo_Order_${order.id}.pdf`, { type: 'application/pdf' });
+            const file = new File([pdfBlob], `Valo_Order_${order.displayId || order.id}.pdf`, { type: 'application/pdf' });
 
             document.body.removeChild(container);
 
-            // 4. Try Native Web Share API (Works great on Android/iOS Capacitor)
-            if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                await navigator.share({
-                    files: [file],
-                    title: `Valo Hotel Bill #${order.id}`,
-                    text: `Here is the receipt for Order #${order.id}.`
-                });
+            const url = URL.createObjectURL(pdfBlob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = file.name;
+            a.click();
+            
+            const rawPhone = order.customer?.phone;
+            if (rawPhone && rawPhone !== 'Walk-in' && rawPhone.trim() !== '') {
+                let waPhone = rawPhone.replace(/\D/g, '');
+                if (waPhone.length === 10) waPhone = '91' + waPhone; 
+                
+                const text = encodeURIComponent(`Hello ${order.customer?.name || ''}, here is your bill from Valo Hotel. Please attach the PDF that was just downloaded.`);
+                const waUrl = `https://wa.me/${waPhone}?text=${text}`;
+                
+                setTimeout(() => {
+                    alert("✅ PDF Downloaded! Opening WhatsApp chat now. Please click the attachment (+) icon in WhatsApp to send the downloaded PDF.");
+                    window.open(waUrl, '_blank');
+                }, 500);
             } else {
-                // Fallback for PC/Unsupported browsers: Download directly
-                const url = URL.createObjectURL(pdfBlob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = file.name;
-                a.click();
-                alert("PDF Downloaded! You can now send it to the customer on WhatsApp.");
+                alert("✅ PDF Downloaded! This order doesn't have a valid phone number to open WhatsApp directly.");
             }
 
         } catch (error) {
-            alert("Failed to generate or share PDF.");
+            alert("Failed to generate PDF.");
             console.error(error);
         } finally {
             btn.innerHTML = originalHtml;
@@ -680,89 +1401,224 @@ function AdminDashboard({ onLogout }) {
         }
     };
 
-    // --- CRUD MENU & MOMENTS ---
-    const handleSaveItem = async (e) => {
+    const handleAddExpense = async (e) => {
         e.preventDefault();
-        const form = new FormData(e.target);
-        const file = form.get('image');
-        let imgUrl = itemModal.data?.img || "https://images.unsplash.com/photo-1546833999-b9f581a1996d?w=200";
+        if(!expenseDesc || !expenseAmount) return;
 
-        if (file && file.size > 0) {
-            try {
-                const fileExt = file.name.split('.').pop();
-                const fileName = `${Date.now()}.${fileExt}`;
-                const { error: uploadError } = await supabase.storage.from('menu_photos').upload(fileName, file);
-                if (uploadError) throw uploadError;
-                const { data } = supabase.storage.from('menu_photos').getPublicUrl(fileName);
-                imgUrl = data.publicUrl;
-            } catch (error) {
-                alert("Upload failed. Error: " + error.message);
-                return;
-            }
-        }
-
-        const newItem = {
-            name: form.get('name'), price: `₹${form.get('price')}`, description: form.get('desc'), category_id: form.get('category'), img: imgUrl, in_stock: true, is_special: false
+        const newExpense = {
+            date: getFormattedDate(),
+            time: getFormattedTime(),
+            timestamp: Date.now(),
+            amount: Number(expenseAmount),
+            description: expenseDesc,
+            mode: expenseMode
         };
 
-        if (itemModal.mode === 'add') await supabase.from('menu_items').insert([newItem]);
-        else await supabase.from('menu_items').update(newItem).eq('id', itemModal.data.id);
-        setItemModal({ open: false, mode: 'add', data: null });
-    };
-
-    const toggleStock = async (item) => await supabase.from('menu_items').update({ in_stock: !item.in_stock }).eq('id', item.id);
-    const toggleSpecial = async (item) => await supabase.from('menu_items').update({ is_special: !item.is_special }).eq('id', item.id);
-    const deleteItem = async (id) => { if(confirm('Delete item?')) await supabase.from('menu_items').delete().eq('id', id); };
-
-    const handleSaveCategory = async (e) => {
-        e.preventDefault();
-        const form = new FormData(e.target);
-        const file = form.get('image');
-        let imgUrl = "https://images.unsplash.com/photo-1540189549336-e6e99c3679fe?w=400";
-        if (file && file.size > 0) {
-             try {
-                const fileExt = file.name.split('.').pop();
-                const fileName = `cat_${Date.now()}.${fileExt}`;
-                const { error } = await supabase.storage.from('menu_photos').upload(fileName, file);
-                if(error) throw error;
-                const { data } = supabase.storage.from('menu_photos').getPublicUrl(fileName);
-                imgUrl = data.publicUrl;
-             } catch(e) { alert("Upload failed: " + e.message); return; }
+        const { error } = await supabase.from('expenses').insert([newExpense]);
+        if (error) {
+            alert("Error adding expense: " + error.message);
+        } else {
+            setExpenseDesc('');
+            setExpenseAmount('');
+            alert("Expense Saved!");
+            fetchData();
         }
-        await supabase.from('categories').insert([{ name: form.get('name'), img: imgUrl }]);
-        setCatModal(false);
     };
-    const deleteCategory = async (id) => { if(confirm('Delete Category?')) await supabase.from('categories').delete().eq('id', id); };
 
-    const handleSaveMoment = async (e) => {
-        e.preventDefault();
-        const form = new FormData(e.target);
-        const file = form.get('image');
-        let imgUrl = momentModal.data?.src || "https://images.unsplash.com/photo-1519671482502-9759101d3361?w=400";
-        if (file && file.size > 0) {
-             try {
-                const fileExt = file.name.split('.').pop();
-                const fileName = `mom_${Date.now()}.${fileExt}`;
-                const { error: uploadError } = await supabase.storage.from('menu_photos').upload(fileName, file);
-                if(uploadError) throw uploadError;
-                const { data } = supabase.storage.from('menu_photos').getPublicUrl(fileName);
-                imgUrl = data.publicUrl;
-             } catch(e) { alert("Upload failed. Make sure Storage Policies are set! Error: " + e.message); return; }
+    const deleteExpense = async (id) => {
+        if(confirm("Are you sure you want to delete this expense?")) {
+            await supabase.from('expenses').delete().eq('id', id);
+            fetchData();
         }
-        const newMoment = { caption: form.get('caption'), src: imgUrl, type: 'image' };
-        if (momentModal.mode === 'add') { await supabase.from('moments').insert([newMoment]); } 
-        else { await supabase.from('moments').update(newMoment).eq('id', momentModal.data.id); }
-        setMomentModal({ open: false, mode: 'add', data: null });
     };
 
-    const deleteMoment = async (id) => { if(confirm('Are you sure you want to delete this moment?')) { await supabase.from('moments').delete().eq('id', id); } };
+   const getCurrentDrawerCash = () => {
+        let cashIn = 0;
+        let cashOut = 0;
 
-    // --- COMBINED ANALYTICS & TRANSACTIONS LOGIC ---
+        // Add all Cash Orders
+        orders.forEach(o => {
+            if (o.status === 'Picked Up' && o.paymentStatus === 'Paid') {
+                const pm = String(o.paymentMethod || 'Cash').toLowerCase();
+                if (pm === 'split') cashIn += Number(o.splitAmounts?.cash || 0);
+                else if (!pm.includes('online') && !pm.includes('upi') && !pm.includes('card')) cashIn += Number(o.total || 0);
+            }
+        });
+
+        // Subtract all Cash Expenses
+        expenses.forEach(e => {
+            if (e.mode === 'Cash') cashOut += Number(e.amount);
+        });
+
+        // Subtract all Cash Purchases
+        purchasesData.forEach(p => {
+            if (p.payment_mode === 'Cash') cashOut += Number(p.total_cost);
+        });
+
+        return cashIn - cashOut;
+    };
+
+   // NEW: Auto-load the last saved cash details when the page loads
+    useEffect(() => {
+        if (drawerCashRecords.length > 0 && drawerInput === '') {
+            setDrawerInput(String(drawerCashRecords[0].amount || ''));
+            setDrawerTakenOut(String(drawerCashRecords[0].taken_out || ''));
+            setDrawerTakenBy(drawerCashRecords[0].taken_by || '');
+        }
+    }, [drawerCashRecords, drawerInput]);
+
+    const handleSaveDrawerCash = async (e) => {
+        e.preventDefault();
+        // Prevent saving if both boxes are completely empty
+        if(!drawerInput && !drawerTakenOut) return; 
+
+        const payload = {
+            // If physical cash is left empty, it safely remembers the last saved amount
+            amount: drawerInput !== '' ? Number(drawerInput) : (drawerCashRecords[0]?.amount || 0),
+            taken_out: Number(drawerTakenOut) || 0,
+            taken_by: drawerTakenBy || 'Self',
+            date: getFormattedDate(),
+            time: getFormattedTime(),
+            timestamp: Date.now()
+        };
+        
+        await supabase.from('drawer_cash').insert([payload]);
+        
+        // THIS EMPTIES THE TEXT BOXES AFTER SAVING!
+        setDrawerInput('');
+        setDrawerTakenOut('');
+        setDrawerTakenBy('');
+        
+        fetchData(); // Refreshes the math engine and history table instantly
+    };
+
+    const calculateDailyFinancials = () => {
+        const dailyData = {};
+
+        orders.forEach(o => {
+            if (o.status === 'Picked Up' && o.paymentStatus === 'Paid') {
+                const nDate = normalizeDateStr(o.date);
+                if (!nDate) return;
+                
+                if (!dailyData[nDate]) {
+                    dailyData[nDate] = { cashIn: 0, onlineIn: 0, cashOut: 0, onlineOut: 0 };
+                }
+                
+                let cIn = 0; let oIn = 0;
+                const pm = String(o.paymentMethod || 'Cash').toLowerCase();
+                
+                if (pm === 'split') {
+                    cIn = Number(o.splitAmounts?.cash || 0);
+                    oIn = Number(o.splitAmounts?.online || 0);
+                } else if (pm.includes('online') || pm.includes('upi') || pm.includes('card')) {
+                    oIn = Number(o.total);
+                } else {
+                    cIn = Number(o.total); 
+                }
+
+                dailyData[nDate].cashIn += cIn;
+                dailyData[nDate].onlineIn += oIn;
+            }
+        });
+
+        expenses.forEach(e => {
+            const nDate = normalizeDateStr(e.date);
+            if (!nDate) return;
+            
+            if (!dailyData[nDate]) {
+                dailyData[nDate] = { cashIn: 0, onlineIn: 0, cashOut: 0, onlineOut: 0 };
+            }
+            
+            if (e.mode === 'Online') {
+                dailyData[nDate].onlineOut += Number(e.amount);
+            } else {
+                dailyData[nDate].cashOut += Number(e.amount);
+            }
+        });
+
+        const sortedDates = Object.keys(dailyData).sort((a, b) => {
+            const [da, ma, ya] = a.split('/');
+            const [db, mb, yb] = b.split('/');
+            const timeA = new Date(`${ya}-${ma}-${da}T00:00:00`).getTime();
+            const timeB = new Date(`${yb}-${mb}-${db}T00:00:00`).getTime();
+            return timeA - timeB;
+        });
+
+        let runningRemaining = 0;
+        let totalLifetimeCashIn = 0;
+        let totalLifetimeOnlineIn = 0;
+        let totalLifetimeCashOut = 0;
+        let totalLifetimeOnlineOut = 0;
+
+        const ledger = {};
+
+        sortedDates.forEach(date => {
+            const day = dailyData[date];
+            const initialAmount = runningRemaining;
+            
+            const dayNet = (day.cashIn + day.onlineIn) - (day.cashOut + day.onlineOut);
+
+            runningRemaining += dayNet;
+
+            totalLifetimeCashIn += day.cashIn;
+            totalLifetimeOnlineIn += day.onlineIn;
+            totalLifetimeCashOut += day.cashOut;
+            totalLifetimeOnlineOut += day.onlineOut;
+
+            ledger[date] = {
+                ...day,
+                initialAmount,
+                remainingAmount: runningRemaining
+            };
+        });
+
+        const filterDateParts = expenseDateFilter.split('-');
+        const displayFilterDate = filterDateParts.length === 3 
+            ? `${filterDateParts[2]}/${filterDateParts[1]}/${filterDateParts[0]}` 
+            : getFormattedDate();
+
+        const todayStats = ledger[displayFilterDate] || { 
+            cashIn: 0, onlineIn: 0, cashOut: 0, onlineOut: 0, 
+            initialAmount: 0, remainingAmount: 0 
+        };
+
+        const dayExpenses = expenses.filter(e => normalizeDateStr(e.date) === displayFilterDate);
+
+       return {
+            dateStr: displayFilterDate,
+            initialAmount: todayStats.initialAmount,
+            cashIn: todayStats.cashIn, 
+            onlineIn: todayStats.onlineIn,
+            cashOut: todayStats.cashOut, 
+            onlineOut: todayStats.onlineOut,
+            totalRem: todayStats.remainingAmount,
+
+            lifetimeCashIn: totalLifetimeCashIn, 
+            lifetimeOnlineIn: totalLifetimeOnlineIn,
+            lifetimeCashOut: totalLifetimeCashOut, 
+            lifetimeOnlineOut: totalLifetimeOnlineOut,
+            
+           lifetimeCashRem: totalLifetimeCashIn - totalLifetimeCashOut,
+            
+            lifetimeOnlineRem: totalLifetimeOnlineIn - totalLifetimeOnlineOut,
+            lifetimeTotalRem: runningRemaining,
+
+            dayExpenses
+        };
+    };
+
+    const financials = calculateDailyFinancials();
+
     const getFilteredTransactions = () => {
-        const now = new Date();
         let filtered = orders.filter(o => o.paymentStatus === 'Paid');
         
-        if (analyticsFilter !== 'All') {
+        if (analyticsFilter === 'Custom') {
+            const parts = analyticsCustomDate.split('-');
+            const customD1 = `${parseInt(parts[2], 10).toString().padStart(2,'0')}/${parseInt(parts[1], 10).toString().padStart(2,'0')}/${parts[0]}`;
+            const customD2 = `${parts[2]}/${parts[1]}/${parts[0]}`;
+            filtered = filtered.filter(o => normalizeDateStr(o.date) === customD1 || normalizeDateStr(o.date) === customD2);
+        } else if (analyticsFilter !== 'All') {
+            const now = new Date();
             filtered = filtered.filter(o => {
                 const orderDate = new Date(o.timestamp);
                 if (analyticsFilter === 'Today') {
@@ -778,7 +1634,6 @@ function AdminDashboard({ onLogout }) {
                 return true;
             });
         }
-        // Force sort Newest First
         return filtered.sort((a, b) => b.id - a.id);
     };
 
@@ -790,7 +1645,7 @@ function AdminDashboard({ onLogout }) {
             const orderDate = new Date(o.timestamp);
             let key = '';
             
-            if (analyticsFilter === 'Today') {
+            if (analyticsFilter === 'Today' || analyticsFilter === 'Custom') {
                 key = orderDate.toLocaleTimeString('en-US', { hour: 'numeric', hour12: true });
             } else if (analyticsFilter === 'Weekly') {
                 key = orderDate.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
@@ -809,7 +1664,19 @@ function AdminDashboard({ onLogout }) {
 
     const handleFilterChange = (filter) => {
         setAnalyticsFilter(filter);
-        setTransactionPage(1); // Reset pagination on filter change
+        setTransactionPage(1); 
+    };
+
+    const handleExportAnalytics = () => {
+        const data = getFilteredTransactions().map(o => ({
+            "Order ID": o.displayId || o.id,
+            "Date": o.date,
+            "Time": o.time,
+            "Customer": o.customer?.name || 'Walk-in',
+            "Amount": o.total,
+            "Payment Method": o.paymentMethod === 'Split' ? `Split (Cash: ${o.splitAmounts?.cash}, Online: ${o.splitAmounts?.online})` : (o.paymentMethod || 'Cash')
+        }));
+        exportCSV(data, `Analytics_Export_${analyticsFilter}.csv`);
     };
 
     const filteredTxns = getFilteredTransactions();
@@ -817,12 +1684,45 @@ function AdminDashboard({ onLogout }) {
     const totalTxnPages = Math.max(1, Math.ceil(filteredTxns.length / txnsPerPage));
     const currentTxns = filteredTxns.slice((transactionPage - 1) * txnsPerPage, transactionPage * txnsPerPage);
 
-    // --- OTHER HELPERS ---
     const getSortedHistory = () => {
-        // Flatten and sort strictly by ID descending (newest first)
-        return orders
+        let history = orders
             .filter(o => o.status === 'Picked Up' || o.status === 'Cancelled')
             .sort((a, b) => b.id - a.id);
+
+        if (historyItemSearch.trim() !== '') {
+            const query = historyItemSearch.toLowerCase();
+            history = history.filter(order => {
+                const itemsObj = order.items || {};
+                const customArr = order.customItems || [];
+                
+                const hasRegularMatch = Object.keys(itemsObj).some(id => {
+                    const mItem = menuItems.find(i => i.id === parseInt(id));
+                    return mItem && mItem.name.toLowerCase().includes(query);
+                });
+                
+                const hasCustomMatch = customArr.some(ci => ci.name.toLowerCase().includes(query));
+                
+                return hasRegularMatch || hasCustomMatch;
+            });
+        }
+
+        return history;
+    };
+
+    const handleExportHistory = () => {
+        const data = getSortedHistory().map(o => ({
+            "Order ID": o.displayId || o.id,
+            "Date": o.date,
+            "Time": o.time,
+            "Table": o.tableNo,
+            "Customer": o.customer?.name || 'Walk-in',
+            "Phone": o.customer?.phone || '',
+            "Total Amount": o.total,
+            "Items": o.item_names || '',
+            "Payment Method": o.paymentMethod === 'Split' ? `Split (Cash: ${o.splitAmounts?.cash}, Online: ${o.splitAmounts?.online})` : (o.paymentMethod || 'Cash'),
+            "Status": o.status
+        }));
+        exportCSV(data, 'Order_History.csv');
     };
 
     const getFilteredLiveOrders = () => {
@@ -832,6 +1732,25 @@ function AdminDashboard({ onLogout }) {
     };
     
     const pendingOrders = orders.filter(o => o.status === 'Received').length;
+    const pendingPaymentOrdersCount = orders.filter(o => o.status === 'Picked Up' && o.paymentStatus === 'Pending').length;
+    const pendingPaymentList = orders.filter(o => o.status === 'Picked Up' && o.paymentStatus === 'Pending').sort((a,b) => b.id - a.id);
+
+    const filteredMenuSuggestions = menuItems.filter(i => i.name.toLowerCase().includes(billItemSearch.toLowerCase()));
+    const filteredInvSuggestions = inventoryItems.filter(i => i.name.toLowerCase().includes(billItemSearch.toLowerCase()));
+    const combinedSuggestions = [...filteredMenuSuggestions, ...filteredInvSuggestions];
+
+    const getFormSuggestions = (query) => {
+        const q = query.trim().toLowerCase();
+        if (!q) return [];
+        const m = menuItems.filter(i => i.name.toLowerCase().includes(q));
+        const inv = inventoryItems.filter(i => i.name.toLowerCase().includes(q) || (i.barcode && i.barcode.toLowerCase().includes(q)));
+        return [...m, ...inv];
+    };
+
+    const combinedCustomSuggestions = getFormSuggestions(customItemForm.name);
+    const staffModalSuggestions = getFormSuggestions(staffForm.name);
+    const missingModalSuggestions = getFormSuggestions(missingForm.name);
+    const historyItemSuggestions = getFormSuggestions(historyItemForm.name);
 
     const filteredCategoriesForMenu = categories.filter(cat => {
         if (!menuSearchQuery) return true;
@@ -844,27 +1763,721 @@ function AdminDashboard({ onLogout }) {
         return matchesCat || hasMatchingItem;
     });
 
-    return (
-        <div className="min-h-screen bg-slate-900 text-white font-sans flex overflow-hidden">
-            <audio ref={audioRef} loop src={alertTone} />
+    const filteredInventory = inventoryItems
+        .filter(item => 
+            item.name.toLowerCase().includes(inventorySearchQuery.toLowerCase()) || 
+            item.barcode.toLowerCase().includes(inventorySearchQuery.toLowerCase())
+        )
+        .sort((a, b) => a.name.localeCompare(b.name));
 
-            {/* --- MODALS --- */}
-            {adminPaymentModal.open && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-sm border border-white/10 text-center shadow-2xl animate-scale-in">
-                        <h3 className="text-xl font-bold mb-6 text-white">Select Payment Method</h3>
-                        <div className="flex gap-4 mb-4">
-                            <button onClick={() => handleAdminMarkPaid('Cash')} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Cash</button>
-                            <button onClick={() => handleAdminMarkPaid('Online')} className="flex-1 bg-blue-500 hover:bg-blue-400 text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Online</button>
+   return (
+    <div className="h-screen w-full bg-slate-900 text-white font-sans flex overflow-hidden">
+        
+        {/* ADD THIS STYLE BLOCK TO HIDE SCROLLBARS */}
+        <style dangerouslySetInnerHTML={{__html: `
+            ::-webkit-scrollbar { display: none; }
+            * { -ms-overflow-style: none; scrollbar-width: none; }
+        `}} />
+
+        <audio ref={audioRef} loop src={alertTone} />
+            {/* CREATE BILL MODAL (MERGED) */}
+            {createBillModal && (
+                <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-900 border border-white/10 p-6 rounded-2xl w-full max-w-6xl max-h-[95vh] overflow-y-auto shadow-2xl relative scrollbar-hide">
+                        <button onClick={() => setCreateBillModal(false)} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
+                        <div className="space-y-6 pb-10">
+                            <h2 className="text-2xl font-bold pr-10">Create New Bill</h2>
+
+                            <div className="mb-4 p-4 bg-black/20 rounded-xl border border-white/5 shadow-inner">
+                                <form onSubmit={handleBillBarcodeSubmit} className="flex gap-3">
+                                    <div className="flex-1 relative">
+                                        <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-xl">📷</span>
+                                        <input 
+                                            type="text" 
+                                            placeholder="Scan Barcode to Quick-Add..." 
+                                            className="w-full bg-black/40 border border-white/10 rounded-lg pl-10 pr-4 py-3 text-white focus:border-cyan-500 outline-none transition"
+                                            value={billBarcode}
+                                            onChange={e => setBillBarcode(e.target.value)}
+                                        />
+                                    </div>
+                                    <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-6 py-3 rounded-lg transition shadow-lg">Scan</button>
+                                </form>
+                            </div>
+                            
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 lg:col-span-1 space-y-4 h-fit">
+                                    <h3 className="text-lg font-bold text-cyan-400 border-b border-white/10 pb-2">Customer Info</h3>
+                                    <div><label className="text-xs text-gray-400 mb-1 block">Name</label><input type="text" placeholder="Walk-in Customer" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billCustomerName} onChange={e=>setBillCustomerName(e.target.value)} /></div>
+                                    <div><label className="text-xs text-gray-400 mb-1 block">Phone Number</label><input type="text" placeholder="Optional" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billCustomerPhone} onChange={e=>setBillCustomerPhone(e.target.value)} /></div>
+                                    <div><label className="text-xs text-gray-400 mb-1 block">Table / Location</label><input type="text" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billTableNo} onChange={e=>setBillTableNo(e.target.value)} /></div>
+                                </div>
+
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 lg:col-span-2 space-y-6">
+                                    <h3 className="text-lg font-bold text-cyan-400 border-b border-white/10 pb-2">Add Items</h3>
+                                    
+                                    <div className="flex flex-col md:flex-row gap-3 relative">
+                                        <div className="flex-1 relative">
+                                            <input 
+                                                type="text" 
+                                                placeholder="Search menu or inventory..." 
+                                                className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" 
+                                                value={billItemSearch} 
+                                                onChange={(e) => { 
+                                                    setBillItemSearch(e.target.value); 
+                                                    setSelectedMenuId(null); 
+                                                    setSelectedInvId(null);
+                                                    setShowSuggestions(true); 
+                                                }} 
+                                                onFocus={() => setShowSuggestions(true)}
+                                                onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                                            />
+                                            {showSuggestions && billItemSearch && (
+                                                <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-48 overflow-y-auto z-[100]">
+                                                    {combinedSuggestions.map(item => {
+                                                        const isInv = item.barcode !== undefined;
+                                                        return (
+                                                            <div key={isInv ? `inv_${item.id}` : `menu_${item.id}`} onMouseDown={(e) => {
+                                                                e.preventDefault();
+                                                                handleSelectSuggestion(item, isInv);
+                                                            }} className="p-3 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between items-center text-xs">
+                                                                <span className="font-bold">{item.name} {isInv && <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded" title="Inventory Item">📦 In Stock: {item.stock}</span>}</span>
+                                                                <span className="font-bold font-mono text-xs">₹{item.price}</span>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                    {combinedSuggestions.length === 0 && (
+                                                        <div className="p-3 text-gray-400 text-xs italic">Press 'Add' to create as custom item</div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <input type="number" placeholder="Price (₹)" className={`w-full md:w-28 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none ${(selectedMenuId || selectedInvId) ? 'opacity-50 cursor-not-allowed' : ''}`} value={billItemPrice} onChange={e=>setBillItemPrice(e.target.value)} disabled={!!selectedMenuId || !!selectedInvId} />
+                                        <input type="number" placeholder="Qty" className="w-full md:w-20 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billItemQty} onChange={e=>setBillItemQty(e.target.value)} min="1" />
+                                        <button onClick={handleAddBillItem} className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-cyan-500/20">Add</button>
+                                    </div>
+
+                                    <div className="bg-black/20 rounded-lg border border-white/5 overflow-hidden w-full max-w-[100vw] overflow-x-auto">
+                                        <table className="w-full text-left text-sm text-gray-300 min-w-[450px]">
+                                            <thead className="bg-black/40 text-xs uppercase">
+                                                <tr>
+                                                    <th className="p-3">Item</th>
+                                                    <th className="p-3 text-right">Rate</th>
+                                                    <th className="p-3 text-center w-24">Qty</th>
+                                                    <th className="p-3 text-right">Total</th>
+                                                    <th className="p-3 text-center"></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {billItemsList.map((item) => (
+                                                    <tr key={item.uniqueId} className="border-b border-white/5 last:border-0 hover:bg-white/5">
+                                                        <td className="p-3 text-white font-medium">
+                                                            {item.name} 
+                                                            {item.isInv && <span className="text-[9px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded ml-2" title="Inventory Item">📦</span>}
+                                                            {!item.menuId && !item.isInv && <span className="text-[9px] bg-cyan-500/20 text-cyan-400 px-1 rounded ml-1">CUSTOM</span>}
+                                                        </td>
+                                                        <td className="p-3 text-right text-gray-400">₹{item.price}</td>
+                                                        
+                                                        <td className="p-3 text-center">
+                                                            <div className="flex items-center justify-center gap-2">
+                                                                <button onClick={() => updateBillItemQty(item.uniqueId, item.qty - 1)} disabled={item.qty <= 1} className="w-6 h-6 rounded bg-slate-700 hover:bg-slate-600 text-white flex items-center justify-center transition disabled:opacity-50">-</button>
+                                                                <span className="font-bold w-4">{item.qty}</span>
+                                                                <button onClick={() => updateBillItemQty(item.uniqueId, item.qty + 1)} className="w-6 h-6 rounded bg-slate-700 hover:bg-slate-600 text-white flex items-center justify-center transition">+</button>
+                                                            </div>
+                                                        </td>
+
+                                                        <td className="p-3 text-right text-cyan-400 font-bold">₹{item.price * item.qty}</td>
+                                                        <td className="p-3 text-center"><button onClick={() => setBillItemsList(billItemsList.filter(i => i.uniqueId !== item.uniqueId))} className="text-red-400 hover:text-red-300 bg-red-500/10 p-1.5 rounded">✕</button></td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                        {billItemsList.length === 0 && <div className="text-center py-8 text-gray-500 text-sm">No items added to bill yet.</div>}
+                                    </div>
+
+                                    <div className="flex flex-col md:flex-row justify-between items-center pt-4 border-t border-white/10 gap-4">
+                                        <div className="text-lg text-gray-400">Grand Total: <span className="text-white font-bold text-3xl ml-2">₹{billItemsList.reduce((sum, i) => sum + (i.price * i.qty), 0)}</span></div>
+                                        <button onClick={handleCreateAndPrintBill} disabled={billItemsList.length === 0} className={`w-full md:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${billItemsList.length > 0 ? 'bg-green-500 text-black hover:bg-green-400 shadow-lg shadow-green-500/20' : 'bg-slate-700 text-gray-500 cursor-not-allowed'}`}>
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                                            Create & Print
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
-                        <button onClick={() => handleAdminMarkPaid('Split')} className="w-full bg-purple-500 hover:bg-purple-400 text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Split Payment</button>
-                        
-                        <button onClick={() => setAdminPaymentModal({ open: false, orderId: null })} className="mt-6 text-gray-400 hover:text-white text-sm font-bold w-full p-2">Cancel</button>
                     </div>
                 </div>
             )}
 
-            {itemModal.open && (
+            {/* --- STAFF EXPENSES MODAL --- */}
+            {staffModal.open && (
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-white/10 shadow-2xl relative">
+                        <h3 className="text-xl font-bold mb-4 text-cyan-400">Add Staff Expense</h3>
+                        <form onSubmit={handleSaveStaffExpense} className="space-y-4">
+                            <div>
+                                <label className="text-xs text-gray-400">Select Employee</label>
+                                <select 
+                                    className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 mb-2 outline-none focus:border-cyan-500"
+                                    value={isCustomStaff ? 'custom' : staffForm.staff_name}
+                                    onChange={(e) => {
+                                        if (e.target.value === 'custom') {
+                                            setIsCustomStaff(true);
+                                            setStaffForm({...staffForm, staff_name: ''});
+                                        } else {
+                                            setIsCustomStaff(false);
+                                            setStaffForm({...staffForm, staff_name: e.target.value});
+                                        }
+                                    }}
+                                >
+                                    <option value="" disabled>-- Select Staff Member --</option>
+                                    {uniqueStaffNames.map(s => <option key={s} value={s}>{s}</option>)}
+                                    <option value="custom" className="font-bold text-cyan-400">+ Add New Employee</option>
+                                </select>
+                                {isCustomStaff && (
+                                    <input type="text" placeholder="Enter New Employee Name" className="w-full bg-black/50 border border-cyan-500/50 rounded-lg p-3 text-white outline-none" value={staffForm.staff_name} onChange={e => setStaffForm({...staffForm, staff_name: e.target.value})} required autoFocus />
+                                )}
+                            </div>
+                            
+                            <div className="relative">
+                                <label className="text-xs text-gray-400">Search Item (Menu or Inventory)</label>
+                                <input 
+                                    type="text" 
+                                    placeholder="Search item..." 
+                                    className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500"
+                                    value={staffForm.name}
+                                    onChange={e => {
+                                        setStaffForm({...staffForm, name: e.target.value, menuId: null, invId: null, isInv: false});
+                                        setStaffShowSugg(true);
+                                    }}
+                                    onFocus={() => setStaffShowSugg(true)}
+                                    onBlur={() => setTimeout(() => setStaffShowSugg(false), 200)}
+                                    required
+                                />
+                                {staffShowSugg && staffForm.name && (
+                                    <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
+                                        {staffModalSuggestions.map(item => {
+                                            const isInv = item.barcode !== undefined;
+                                            return (
+                                                <div key={isInv ? `inv_${item.id}` : `menu_${item.id}`} onMouseDown={(e) => {
+                                                    e.preventDefault();
+                                                    setStaffForm({
+                                                        ...staffForm,
+                                                        name: item.name,
+                                                        price: parseInt(String(item.price).replace(/[^0-9]/g, '')) || 0,
+                                                        menuId: isInv ? null : item.id,
+                                                        invId: isInv ? item.id : null,
+                                                        isInv: isInv
+                                                    });
+                                                    setStaffShowSugg(false);
+                                                }} className="p-3 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between items-center text-xs">
+                                                    <span className="font-bold">{item.name} {isInv && <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded" title="Inventory Item">📦 In Stock: {item.stock}</span>}</span>
+                                                    <span className="font-bold font-mono text-xs">₹{item.price}</span>
+                                                </div>
+                                            );
+                                        })}
+                                        {staffModalSuggestions.length === 0 && <div className="p-3 text-gray-400 text-xs italic">Custom item will be created. Type price manually.</div>}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex gap-4">
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-400">Quantity</label>
+                                    <input type="number" min="1" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" value={staffForm.qty} onChange={e => setStaffForm({...staffForm, qty: e.target.value})} required />
+                                </div>
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-400">Price per unit (₹)</label>
+                                    <input type="number" min="0" className={`w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none ${staffForm.menuId || staffForm.invId ? 'opacity-50 cursor-not-allowed' : 'focus:border-cyan-500'}`} value={staffForm.price} onChange={e => setStaffForm({...staffForm, price: e.target.value})} disabled={!!staffForm.menuId || !!staffForm.invId} required />
+                                </div>
+                            </div>
+                            
+                            <div className="flex justify-between items-center bg-black/50 p-3 rounded-lg border border-white/5">
+                                <span className="text-sm text-gray-400">Total Deduction:</span>
+                                <span className="text-xl font-black text-red-400">-₹{(Number(staffForm.qty) || 0) * (Number(staffForm.price) || 0)}</span>
+                            </div>
+
+                            <div className="flex gap-2 mt-4">
+                                <button type="button" onClick={() => setStaffModal({open: false})} className="flex-1 bg-red-500/20 text-red-400 py-3 rounded-xl hover:bg-red-500 hover:text-white transition">Cancel</button>
+                                <button type="submit" className="flex-1 bg-cyan-500 text-black font-bold py-3 rounded-xl hover:bg-cyan-400 transition">Confirm Deduction</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+           {/* --- MISSING & DEFECTIVE MODAL --- */}
+            {missingModal.open && (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-white/10 shadow-2xl relative">
+                        <button onClick={() => setMissingModal({open: false})} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
+                        <h3 className="text-xl font-bold mb-4 text-orange-400">Record Loss / Defect</h3>
+                        
+                        <form onSubmit={handleSaveMissingItem} className="space-y-4">
+                            <div>
+                                <label className="text-xs text-gray-400">Record Type</label>
+                                <select name="type" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-orange-500">
+                                    <option value="Missing">❓ Missing / Stolen</option>
+                                    <option value="Defective">💔 Defective / Expired / Damaged</option>
+                                </select>
+                            </div>
+
+                            <div className="relative">
+                                <label className="text-xs text-gray-400">Item Name</label>
+                                <input 
+                                    type="text" 
+                                    placeholder="Search inventory..." 
+                                    className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-orange-500"
+                                    value={missingForm.name}
+                                    onChange={e => {
+                                        setMissingForm({...missingForm, name: e.target.value, invId: null, isInv: false});
+                                    }}
+                                    required 
+                                />
+                                {/* Suggestions dropdown logic */}
+                                {missingForm.name && (
+                                    <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
+                                        {inventoryItems.filter(i => i.name.toLowerCase().includes(missingForm.name.toLowerCase())).map(item => (
+                                            <div key={item.id} onClick={() => {
+                                                setMissingForm({
+                                                    ...missingForm,
+                                                    name: item.name,
+                                                    price: item.price,
+                                                    invId: item.id,
+                                                    isInv: true
+                                                });
+                                            }} className="p-3 hover:bg-orange-500 hover:text-black cursor-pointer border-b border-white/5 flex justify-between text-xs items-center">
+                                                <span className="font-bold">{item.name} <span className="text-[10px] text-cyan-400">Stock: {item.stock}</span></span>
+                                                <span className="font-bold">₹{item.price}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex gap-4">
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-400">Quantity</label>
+                                    <input 
+                                        type="number" 
+                                        min="1" 
+                                        className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-orange-500"
+                                        value={missingForm.qty}
+                                        onChange={e => setMissingForm({...missingForm, qty: e.target.value})}
+                                        required 
+                                    />
+                                </div>
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-400">Price (Ea)</label>
+                                    <input 
+                                        type="number" 
+                                        min="0" 
+                                        className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-orange-500"
+                                        value={missingForm.price}
+                                        onChange={e => setMissingForm({...missingForm, price: e.target.value})}
+                                        required 
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex gap-2 mt-6">
+                                <button type="button" onClick={() => setMissingModal({open: false})} className="flex-1 bg-red-500/20 text-red-400 py-3 rounded-xl font-bold">Cancel</button>
+                                <button type="submit" className="flex-1 bg-orange-500 hover:bg-orange-400 text-white font-bold py-3 rounded-xl transition shadow-lg">Save Record</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+           {/* --- PURCHASE MODAL --- */}
+            {purchaseModal.open && (
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-white/10 shadow-2xl relative">
+                        <h3 className="text-xl font-bold mb-4 text-green-400">Record Inventory Purchase</h3>
+                        <p className="text-xs text-gray-400 mb-4">Selecting an item below will automatically increase its stock count.</p>
+                        <form onSubmit={handleSavePurchase} className="space-y-4">
+                            
+                            <div className="relative">
+                                <label className="text-xs text-gray-400">Search Existing Inventory</label>
+                                <input type="text" placeholder="Search inventory to restock..." className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.name} onChange={e => { setPurchaseForm({...purchaseForm, name: e.target.value, invId: null}); setPurchaseShowSugg(true); }} onFocus={() => setPurchaseShowSugg(true)} onBlur={() => setTimeout(() => setPurchaseShowSugg(false), 200)} required />
+                                {purchaseShowSugg && purchaseForm.name && (
+                                    <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
+                                        {inventoryItems.filter(i => i.name.toLowerCase().includes(purchaseForm.name.toLowerCase())).map(item => (
+                                            <div key={item.id} onMouseDown={(e) => { e.preventDefault(); setPurchaseForm({...purchaseForm, name: item.name, invId: item.id}); setPurchaseShowSugg(false); }} className="p-3 hover:bg-green-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between items-center text-xs">
+                                                <span className="font-bold">{item.name} <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded">Current Stock: {item.stock}</span></span>
+                                            </div>
+                                        ))}
+                                        {inventoryItems.filter(i => i.name.toLowerCase().includes(purchaseForm.name.toLowerCase())).length === 0 && <div className="p-3 text-gray-400 text-xs italic">Item not found. Will save as regular food/text purchase.</div>}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex gap-4">
+                                <div className="flex-1"><label className="text-xs text-gray-400">Qty Bought</label><input type="number" min="1" step="any" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.qty} onChange={e => setPurchaseForm({...purchaseForm, qty: e.target.value})} required /></div>
+                                <div className="flex-1"><label className="text-xs text-gray-400">Price per unit (₹)</label><input type="number" min="0" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.price} onChange={e => setPurchaseForm({...purchaseForm, price: e.target.value})} required /></div>
+                            </div>
+                            
+                            <div>
+                                <label className="text-xs text-gray-400">Paid Via</label>
+                                <select className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.mode} onChange={e => setPurchaseForm({...purchaseForm, mode: e.target.value})}>
+                                    <option value="Cash">Cash</option>
+                                    <option value="Online">Online</option>
+                                </select>
+                            </div>
+
+                            <div className="flex justify-between items-center bg-black/50 p-3 rounded-lg border border-white/5"><span className="text-sm text-gray-400">Total Purchase Cost:</span><span className="text-xl font-black text-red-400">₹{(Number(purchaseForm.qty) || 0) * (Number(purchaseForm.price) || 0)}</span></div>
+                            <div className="flex gap-2 mt-4"><button type="button" onClick={() => setPurchaseModal({open: false})} className="flex-1 bg-slate-700 text-white py-3 rounded-xl hover:bg-slate-600 transition">Cancel</button><button type="submit" className="flex-1 bg-green-500 text-black font-bold py-3 rounded-xl hover:bg-green-400 transition">Save Purchase</button></div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* --- PURCHASE ITEM DETAILS MODAL --- */}
+            {selectedPurchaseItem && (() => {
+                const records = purchasesData.filter(p => p.item_name === selectedPurchaseItem);
+                return (
+                    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                        <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-2xl border border-white/10 shadow-2xl relative max-h-[80vh] flex flex-col">
+                            <button onClick={() => setSelectedPurchaseItem(null)} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
+                            <h3 className="text-2xl font-bold mb-1 text-white pr-8">{selectedPurchaseItem}</h3>
+                            <p className="text-xs text-gray-400 mb-4">Detailed log of all purchases for this item.</p>
+                            
+                            <div className="overflow-y-auto flex-1 bg-black/20 rounded-xl border border-white/5">
+                                <table className="w-full text-left text-sm text-gray-400">
+                                    <thead className="bg-black/40 text-xs uppercase sticky top-0">
+                                        <tr>
+                                            <th className="p-3">Date</th>
+                                            <th className="p-3 text-center">Qty</th>
+                                            <th className="p-3 text-right">Rate</th>
+                                            <th className="p-3 text-right">Total</th>
+                                            <th className="p-3 text-center">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {records.map(r => (
+                                            <tr key={r.id} className="border-b border-white/5 hover:bg-white/5">
+                                                <td className="p-3 whitespace-nowrap">{r.date} <span className="text-[10px] text-gray-500">{r.time}</span></td>
+                                                <td className="p-3 text-center font-bold text-green-400">+{r.qty}</td>
+                                                <td className="p-3 text-right text-gray-500">₹{r.unit_price}</td>
+                                                <td className="p-3 text-right font-bold text-red-400">₹{r.total_cost}</td>
+                                                <td className="p-3 text-center">
+                                                    <button onClick={() => deletePurchase(r.id)} className="bg-red-500/10 text-red-400 p-1.5 rounded hover:bg-red-500 hover:text-white transition" title="Delete Record">🗑</button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                {records.length === 0 && (
+                                    <div className="p-8 text-center text-gray-500">
+                                        No purchase history found for this item yet. <button onClick={() => setSelectedPurchaseItem(null)} className="text-cyan-400 font-bold ml-2 hover:underline">Close</button>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
+
+           {/* --- HISTORY EDIT MODAL --- */}
+            {editHistoryModal.open && (
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-3xl border border-white/10 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+                        <button onClick={() => setEditHistoryModal({open: false, order: null, tempMethod: 'Cash'})} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
+                        <h3 className="text-xl font-bold mb-6 border-b border-white/10 pb-4">Edit Order #{editHistoryModal.order.displayId || editHistoryModal.order.id}</h3>
+                        
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                            
+                            {/* LEFT COLUMN: ITEMS */}
+                            <div className="space-y-4">
+                                <h4 className="font-bold text-cyan-400">Order Items</h4>
+                                
+                                {/* Current Items List */}
+                                <div className="bg-black/30 rounded-lg p-3 max-h-48 overflow-y-auto border border-white/5 space-y-2 text-sm">
+                                    {Object.entries(editHistoryModal.order.items || {}).map(([id, qty]) => {
+                                        const mItem = menuItems.find(i => i.id === parseInt(id));
+                                        const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
+                                        return (
+                                            <div key={`menu_${id}`} className="flex justify-between items-center border-b border-white/5 pb-2 last:border-0 last:pb-0">
+                                                <div><span className="text-white">{qty}x {mItem?.name || 'Item'}</span></div>
+                                                <div className="text-cyan-400 font-bold">₹{price * qty}</div>
+                                            </div>
+                                        );
+                                    })}
+                                    {(editHistoryModal.order.customItems || []).map(cItem => (
+                                        <div key={cItem.id} className="flex justify-between items-center border-b border-white/5 pb-2 last:border-0 last:pb-0">
+                                            <div><span className="text-white">{cItem.qty}x {cItem.name} {cItem.isInv && '📦'}</span></div>
+                                            <div className="text-cyan-400 font-bold">₹{cItem.price * cItem.qty}</div>
+                                        </div>
+                                    ))}
+                                    {Object.keys(editHistoryModal.order.items || {}).length === 0 && (editHistoryModal.order.customItems || []).length === 0 && <div className="text-xs text-gray-500 italic">No items in this order.</div>}
+                                </div>
+
+                                {/* Add New Item Form */}
+                                <div className="bg-slate-700/50 p-4 rounded-lg border border-white/10 space-y-3">
+                                    <h5 className="text-xs font-bold text-gray-400 uppercase tracking-widest">Add Forgotten Item</h5>
+                                    <div className="relative">
+                                        <input 
+                                            type="text" 
+                                            placeholder="Search menu or inventory..." 
+                                            className="w-full bg-black/50 border border-white/10 rounded p-3 text-sm text-white outline-none focus:border-cyan-500"
+                                            value={historyItemForm.name}
+                                            onChange={e => {
+                                                setHistoryItemForm({...historyItemForm, name: e.target.value, menuId: null, invId: null, isInv: false});
+                                                setHistoryItemSugg(true);
+                                            }}
+                                            onFocus={() => setHistoryItemSugg(true)}
+                                            onBlur={() => setTimeout(() => setHistoryItemSugg(false), 200)}
+                                        />
+                                        {historyItemSugg && historyItemForm.name && (
+                                            <div className="absolute top-full left-0 w-full mt-1 bg-slate-600 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
+                                                {historyItemSuggestions.map(item => {
+                                                    const isInv = item.barcode !== undefined;
+                                                    return (
+                                                        <div key={isInv ? `inv_${item.id}` : `menu_${item.id}`} onMouseDown={(e) => {
+                                                            e.preventDefault();
+                                                            setHistoryItemForm({
+                                                                ...historyItemForm,
+                                                                name: item.name,
+                                                                price: parseInt(String(item.price).replace(/[^0-9]/g, '')) || 0,
+                                                                menuId: isInv ? null : item.id,
+                                                                invId: isInv ? item.id : null,
+                                                                isInv: isInv
+                                                            });
+                                                            setHistoryItemSugg(false);
+                                                        }} className="p-3 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between text-xs items-center">
+                                                            <span className="font-bold">{item.name} {isInv && <span className="ml-2 bg-blue-500/20 text-blue-400 px-1 rounded text-[10px]">📦 Stock: {item.stock}</span>}</span>
+                                                            <span className="font-bold">₹{item.price}</span>
+                                                        </div>
+                                                    );
+                                                })}
+                                                {historyItemSuggestions.length === 0 && <div className="p-3 text-gray-400 text-[10px]">Will be added as a custom entry.</div>}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <input type="number" placeholder="Qty" min="1" className="w-20 bg-black/50 border border-white/10 rounded p-3 text-sm text-white outline-none focus:border-cyan-500" value={historyItemForm.qty} onChange={e => setHistoryItemForm({...historyItemForm, qty: e.target.value})} />
+                                        <input type="number" placeholder="Price (₹)" min="0" className={`w-28 bg-black/50 border border-white/10 rounded p-3 text-sm text-white outline-none focus:border-cyan-500 ${historyItemForm.menuId || historyItemForm.invId ? 'opacity-50 cursor-not-allowed' : ''}`} value={historyItemForm.price} onChange={e => setHistoryItemForm({...historyItemForm, price: e.target.value})} disabled={!!historyItemForm.menuId || !!historyItemForm.invId} />
+                                        <button type="button" onClick={handleHistoryAddItem} className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-4 rounded transition shadow-lg">Add</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* RIGHT COLUMN: PAYMENT & STATUS */}
+                            <div className="space-y-4 border-l-0 md:border-l border-white/10 md:pl-8">
+                                <form id="historyEditForm" onSubmit={handleSaveHistoryEdit} className="space-y-4">
+                                    <div>
+                                        <label className="text-xs text-gray-400 font-bold uppercase tracking-widest">Total Amount (₹)</label>
+                                        <input name="total" type="number" value={editHistoryModal.order.total} onChange={e => setEditHistoryModal({...editHistoryModal, order: {...editHistoryModal.order, total: e.target.value}})} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 text-2xl font-black text-cyan-400 outline-none focus:border-cyan-500" required />
+                                        <p className="text-[10px] text-gray-500 mt-1">Total auto-updates when items are added.</p>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400">Status</label>
+                                        <select name="status" defaultValue={editHistoryModal.order.status} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500">
+                                            <option value="Picked Up">Picked Up</option>
+                                            <option value="Cancelled">Cancelled</option>
+                                            <option value="Ready">Ready</option>
+                                            <option value="Preparing">Preparing</option>
+                                            <option value="Received">Received</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400">Payment Status</label>
+                                        <select name="paymentStatus" defaultValue={editHistoryModal.order.paymentStatus || 'Pending'} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500">
+                                            <option value="Paid">Paid</option>
+                                            <option value="Pending">Pending</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-400">Payment Method</label>
+                                        <select name="paymentMethod" defaultValue={editHistoryModal.order.paymentMethod || 'Cash'} onChange={(e) => setEditHistoryModal({...editHistoryModal, tempMethod: e.target.value})} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500">
+                                            <option value="Cash">Cash</option>
+                                            <option value="Online">Online</option>
+                                            <option value="Split">Split</option>
+                                        </select>
+                                    </div>
+                                    
+                                    {(editHistoryModal.tempMethod === 'Split' || (editHistoryModal.order.paymentMethod === 'Split' && !editHistoryModal.tempMethod)) && (
+                                        <div className="flex gap-4">
+                                            <div className="flex-1"><label className="text-xs text-gray-400">Cash Split (₹)</label><input name="splitCash" type="number" defaultValue={editHistoryModal.order.splitAmounts?.cash || ''} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" required /></div>
+                                            <div className="flex-1"><label className="text-xs text-gray-400">Online Split (₹)</label><input name="splitOnline" type="number" defaultValue={editHistoryModal.order.splitAmounts?.online || ''} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" required /></div>
+                                        </div>
+                                    )}
+                                </form>
+                            </div>
+                        </div>
+                        
+                        <div className="flex justify-end gap-3 mt-8 pt-6 border-t border-white/10">
+                            <button type="button" onClick={() => setEditHistoryModal({open: false, order: null, tempMethod: 'Cash'})} className="bg-slate-700 text-white font-bold px-8 py-3 rounded-xl hover:bg-slate-600 transition">Cancel</button>
+                            <button type="submit" form="historyEditForm" className="bg-cyan-500 text-black font-bold px-8 py-3 rounded-xl hover:bg-cyan-400 transition shadow-lg shadow-cyan-500/20">Save Everything</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            
+            {/* --- INVENTORY MODAL --- */}
+            {invModal.open && (
+                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-sm border border-white/10 shadow-2xl relative">
+                        <h3 className="text-xl font-bold mb-4">{invModal.mode === 'edit' ? 'Edit Inventory Item' : 'Add Inventory Item'}</h3>
+                        <form onSubmit={handleSaveInventory} className="space-y-4">
+                            <div>
+                                <label className="text-xs text-gray-400">Item Name</label>
+                                <input name="name" defaultValue={invModal.data?.name} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-400">Barcode</label>
+                                <input name="barcode" defaultValue={invModal.data?.barcode} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
+                            </div>
+                            <div className="flex gap-4">
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-400">Stock Qty</label>
+                                    <input name="stock" type="number" min="0" defaultValue={invModal.data?.stock} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
+                                </div>
+                                <div className="flex-1">
+                                    <label className="text-xs text-gray-400">Price (₹)</label>
+                                    <input name="price" type="number" min="0" defaultValue={invModal.data?.price} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
+                                </div>
+                            </div>
+                            <div className="flex gap-2 mt-4">
+                                <button type="button" onClick={() => setInvModal({open: false, mode: 'add', data: null})} className="flex-1 bg-red-500/20 text-red-400 py-3 rounded-xl">Cancel</button>
+                                <button type="submit" className="flex-1 bg-cyan-500 text-black font-bold py-3 rounded-xl">Save</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* --- EYE ICON MODAL (ORDER DETAILS) --- */}
+            {viewOrderDetails && (
+                <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-white p-6 rounded-2xl w-full max-w-sm text-black shadow-2xl relative max-h-[90vh] overflow-y-auto">
+                        <button onClick={() => setViewOrderDetails(null)} className="absolute top-4 right-4 text-black hover:text-red-500 font-bold text-xl transition">✕</button>
+                        
+                        <div className="text-center font-black text-xl mb-1">VALO HOTEL</div>
+                        <div className="text-center text-sm mb-4 border-b border-black/20 pb-4">Order Receipt</div>
+                        
+                        <div className="text-sm space-y-1 mb-4">
+                            <div className="flex justify-between"><span>Order:</span><span className="font-bold">#{viewOrderDetails.displayId || viewOrderDetails.id}</span></div>
+                            <div className="flex justify-between"><span>Date:</span><span className="font-bold">{viewOrderDetails.date} {viewOrderDetails.time}</span></div>
+                            <div className="flex justify-between"><span>Table:</span><span className="font-bold">{viewOrderDetails.tableNo}</span></div>
+                            <div className="flex justify-between"><span>Customer:</span><span className="font-bold">{viewOrderDetails.customer?.name || 'Walk-in'}</span></div>
+                            <div className="flex justify-between"><span>Phone:</span><span className="font-bold">{viewOrderDetails.customer?.phone || 'N/A'}</span></div>
+                        </div>
+                        
+                        <table className="w-full text-sm mb-4">
+                            <thead>
+                                <tr className="border-b border-black/20">
+                                    <th className="text-left py-1 w-12">Qty</th>
+                                    <th className="text-left py-1">Item</th>
+                                    <th className="text-right py-1">Amt</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {/* Render regular items */}
+                                {Object.entries(viewOrderDetails.items || {}).map(([id, qty]) => {
+                                    const item = menuItems.find(i => i.id === parseInt(id));
+                                    const priceStr = item ? item.price : '₹0';
+                                    const numericPrice = parseInt(String(priceStr).replace(/[^0-9]/g, '')) || 0;
+                                    return (
+                                        <tr key={id} className="border-b border-black/10 last:border-0">
+                                            <td className="py-2">{qty}x</td>
+                                            <td className="py-2 leading-tight">
+                                                {item?.name || 'Deleted Item'}
+                                                <div className="text-[10px] text-gray-500">@{priceStr}</div>
+                                            </td>
+                                            <td className="py-2 text-right">₹{numericPrice * qty}</td>
+                                        </tr>
+                                    );
+                                })}
+                                {/* Render custom/inventory items */}
+                                {(viewOrderDetails.customItems || []).map((c, i) => (
+                                    <tr key={`c_${i}`} className="border-b border-black/10 last:border-0">
+                                        <td className="py-2">{c.qty}x</td>
+                                        <td className="py-2 leading-tight">
+                                            {c.name} {c.isInv ? '📦' : '*'}
+                                            <div className="text-[10px] text-gray-500">@₹{c.price}</div>
+                                        </td>
+                                        <td className="py-2 text-right">₹{c.price * c.qty}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                        
+                        <div className="border-t border-black/20 pt-2 mb-4 text-sm font-bold">
+                            <div className="flex justify-between text-lg"><span>Total:</span><span>₹{viewOrderDetails.total}</span></div>
+                            <div className="flex justify-between mt-2 text-gray-600 text-xs">
+                                <span>Status:</span>
+                                <span>{viewOrderDetails.paymentStatus === 'Paid' ? `Paid (${viewOrderDetails.paymentMethod})` : 'Pending'}</span>
+                            </div>
+                            {viewOrderDetails.paymentMethod === 'Split' && viewOrderDetails.splitAmounts && (
+                                <div className="flex justify-between mt-1 text-gray-600 text-[10px] bg-gray-100 p-1.5 rounded">
+                                    <span>Split Details:</span>
+                                    <span>Cash ₹{viewOrderDetails.splitAmounts.cash} | Online ₹{viewOrderDetails.splitAmounts.online}</span>
+                                </div>
+                            )}
+                        </div>
+
+                        <button onClick={() => setViewOrderDetails(null)} className="w-full bg-slate-200 hover:bg-slate-300 text-black font-bold py-3 rounded-xl transition">Close</button>
+                    </div>
+                </div>
+            )}
+
+            {adminPaymentModal.open && (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+        <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-sm border border-white/10 text-center shadow-2xl animate-scale-in">
+            {!isSplitMode ? (
+                <>
+                    <h3 className="text-xl font-bold mb-6 text-white">Select Payment Method</h3>
+                    <div className="flex gap-4 mb-4">
+                        <button onClick={() => handleAdminMarkPaid('Cash')} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Cash</button>
+                        <button onClick={() => handleAdminMarkPaid('Online')} className="flex-1 bg-blue-500 hover:bg-blue-400 text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Online</button>
+                    </div>
+                    <div className="flex gap-4 mb-4">
+                        <button onClick={() => setIsSplitMode(true)} className="flex-1 bg-purple-500 hover:bg-purple-400 text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Split Payment</button>
+                        
+                        {/* --- NEW PENDING BUTTON --- */}
+                        <button onClick={() => handleAdminMarkPaid('Pending')} className="flex-1 bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Pending</button>
+                    </div>
+                    
+                    <button onClick={() => { setAdminPaymentModal({ open: false, orderId: null, total: null }); setIsSplitMode(false); }} className="mt-4 text-gray-400 hover:text-white text-sm font-bold w-full p-2">Cancel</button>
+                </>
+            ) : (
+                <>
+                    <h3 className="text-xl font-bold mb-2 text-white">Split Payment</h3>
+                    <div className="text-sm font-bold text-cyan-400 mb-6 bg-cyan-500/10 py-2 rounded-lg">Bill Total: ₹{adminPaymentModal.total}</div>
+                    
+                    <div className="space-y-4 mb-6 text-left">
+                        <div>
+                            <label className="text-xs text-gray-400 mb-1 block uppercase font-bold tracking-widest">Cash Amount (₹)</label>
+                            <input type="number" value={splitCash} onChange={e => setSplitCash(e.target.value)} className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-green-500 outline-none transition" placeholder="0" />
+                        </div>
+                        <div>
+                            <label className="text-xs text-gray-400 mb-1 block uppercase font-bold tracking-widest">Online Amount (₹)</label>
+                            <input type="number" value={splitOnline} onChange={e => setSplitOnline(e.target.value)} className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-blue-500 outline-none transition" placeholder="0" />
+                        </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                        <button onClick={() => setIsSplitMode(false)} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl transition">Back</button>
+                        <button onClick={() => {
+                            const c = Number(splitCash);
+                            const o = Number(splitOnline);
+                            if (c + o !== Number(adminPaymentModal.total)) {
+                                alert(`The split amounts (₹${c + o}) must equal the exact Bill Total (₹${adminPaymentModal.total})`);
+                                return;
+                            }
+                            handleAdminMarkPaid('Split', { cash: c, online: o });
+                        }} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-bold py-3 rounded-xl transition">Confirm</button>
+                    </div>
+                </>
+            )}
+        </div>
+
+       
+    </div>
+)}
+
+       {itemModal.open && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
                     <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-white/10">
                         <h3 className="text-xl font-bold mb-4">{itemModal.mode === 'edit' ? 'Edit Item' : 'Add Item'}</h3>
@@ -915,130 +2528,945 @@ function AdminDashboard({ onLogout }) {
                 </div> 
             )}
 
+    {/* --- DRAWER CASH MODAL --- */}
+            {drawerModal && (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-lg border border-white/10 shadow-2xl relative max-h-[95vh] overflow-y-auto">
+                        <button onClick={() => setDrawerModal(false)} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
+                        <h3 className="text-xl font-bold mb-1 text-yellow-400">Nightly Cash Reconciliation</h3>
+                        <p className="text-xs text-gray-400 mb-6">Calculate exact change left in the box after taking out big notes.</p>
+                        
+                        {/* --- SMART MEMORY MATH ENGINE --- */}
+                        {(() => {
+                            const systemCash = getCurrentDrawerCash();
+                            const lastRecord = drawerCashRecords[0]; 
+                            
+                            // 1. Calculate Lifetime Taken Out
+                            const dbTotalTakenOut = drawerCashRecords.reduce((sum, r) => sum + (Number(r.taken_out) || 0), 0);
+                            
+                            // 2. Add currently typed 'Taken Out' amount to the lifetime total
+                            const activeTakenOut = dbTotalTakenOut + (Number(drawerTakenOut) || 0);
+                            
+                            // 3. If typing physical cash, use it. Otherwise, remember the last saved amount!
+                            const actualPhysical = drawerInput !== '' ? Number(drawerInput) : (lastRecord ? Number(lastRecord.amount || 0) : 0);
+                            
+                            // 4. Do the final math
+                            const expectedPhysical = systemCash - activeTakenOut;
+                            const hasData = drawerInput !== '' || drawerTakenOut !== '' || !!lastRecord;
+                            const difference = hasData ? actualPhysical - expectedPhysical : 0;
+                            
+                            let diffColor = 'text-gray-500';
+                            let diffLabel = '';
+                            if (hasData) {
+                                if (difference > 0) { diffColor = 'text-green-400'; diffLabel = '(Extra / Overage)'; }
+                                else if (difference < 0) { diffColor = 'text-red-400'; diffLabel = '(Shortage)'; }
+                                else { diffColor = 'text-blue-400'; diffLabel = '(Perfect Match)'; }
+                            }
+
+                            return (
+                                <div className="bg-black/30 p-4 rounded-xl border border-white/5 mb-6 shadow-inner space-y-3">
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">1. System Total:</span>
+                                        <span className="text-xl font-black text-cyan-400">₹{systemCash}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center border-t border-white/5 pt-3">
+                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">2. Total Taken Out:</span>
+                                        <span className="text-xl font-black text-orange-400">{activeTakenOut > 0 ? `- ₹${activeTakenOut}` : (hasData ? '₹0' : '-')}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center border-t border-white/5 pt-3">
+                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">3. Expected In Box:</span>
+                                        <span className="text-xl font-black text-white">₹{expectedPhysical}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center border-t border-white/5 pt-3">
+                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">4. Physical Counted:</span>
+                                        <span className="text-xl font-black text-yellow-400">{hasData ? `₹${actualPhysical}` : '-'}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center border-t border-white/10 pt-3 bg-black/40 p-2 rounded-lg mt-2 shadow-inner">
+                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider flex flex-col">
+                                            Difference 
+                                            <span className={`text-[10px] ${diffColor}`}>{diffLabel}</span>
+                                        </span>
+                                        <span className={`text-2xl font-black ${diffColor}`}>
+                                            {hasData ? `${difference > 0 ? '+' : ''}₹${difference}` : '-'}
+                                        </span>
+                                    </div>
+                                </div>
+                            );
+                        })()}
+
+                        <form onSubmit={handleSaveDrawerCash} className="space-y-4 mb-6 border-b border-white/10 pb-6">
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">New Amount Taken Out (₹)</label>
+                                    <input type="number" placeholder="Big notes taken..." className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-orange-500 outline-none transition font-bold" value={drawerTakenOut} onChange={(e) => setDrawerTakenOut(e.target.value)} />
+                                </div>
+                                <div>
+                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">Physical Chiller Left (₹)</label>
+                                    <input type="number" placeholder="Counted cash left..." className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-yellow-500 outline-none transition font-bold" value={drawerInput} onChange={(e) => setDrawerInput(e.target.value)} />
+                                </div>
+                            </div>
+                            <div className="flex gap-3">
+                                <div className="flex-1">
+                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">Taken By (Name)</label>
+                                    <input type="text" placeholder="e.g. Owner, Manager..." className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none transition text-sm" value={drawerTakenBy} onChange={(e) => setDrawerTakenBy(e.target.value)} />
+                                </div>
+                                <div className="flex items-end">
+                                    <button type="submit" className="bg-yellow-500 hover:bg-yellow-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg h-[46px]">Save</button>
+                                </div>
+                            </div>
+                        </form>
+
+                        <h4 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-3">Audit History</h4>
+                        <div className="overflow-y-auto h-[250px] bg-black/20 rounded-xl border border-white/5">
+                            <table className="w-full text-left text-sm text-gray-400">
+                                <thead className="bg-black/40 text-xs uppercase sticky top-0">
+                                    <tr>
+                                        <th className="p-3">Date</th>
+                                        <th className="p-3 text-right">Left In Box</th>
+                                        <th className="p-3 text-right">Taken Out</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {drawerCashRecords.map(r => (
+                                        <tr key={r.id} className="border-b border-white/5 hover:bg-white/5">
+                                            <td className="p-3 whitespace-nowrap">
+                                                {r.date} <span className="text-[10px] text-gray-500 block">{r.time}</span>
+                                                {r.taken_by && <span className="text-[10px] text-cyan-400 block mt-0.5">By: {r.taken_by}</span>}
+                                            </td>
+                                            <td className="p-3 text-right font-bold text-yellow-400">₹{r.amount}</td>
+                                            <td className="p-3 text-right">
+                                                {Number(r.taken_out) > 0 ? (
+                                                    <span className="text-orange-400 font-bold">-₹{r.taken_out}</span>
+                                                ) : (
+                                                    <span className="text-gray-600">-</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            {drawerCashRecords.length === 0 && <div className="p-6 text-center text-gray-500 text-xs">No records yet.</div>}
+                        </div>
+                    </div>
+                </div>
+            )}
+             
+              {/* --- REVENUE DETAILS MODAL --- */}
+            {selectedRevenueCategory && (() => {
+                let detailsList = [];
+                let categoryColor = 'text-white';
+                let categoryTitle = '';
+
+                // Calculate the exact orders that contributed to this specific category
+                filteredTxns.forEach(order => {
+                    let categoryTotal = 0;
+
+                    if (selectedRevenueCategory === 'Food' && order.items) {
+                        categoryTitle = 'Food Revenue Details';
+                        categoryColor = 'text-orange-400';
+                        Object.entries(order.items).forEach(([id, qty]) => {
+                            const mItem = menuItems.find(i => i.id === parseInt(id));
+                            const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
+                            categoryTotal += (Number(qty) * price);
+                        });
+                    } else if (selectedRevenueCategory === 'Inventory' && order.customItems) {
+                        categoryTitle = 'Inventory Revenue Details';
+                        categoryColor = 'text-purple-400';
+                        order.customItems.forEach(cItem => {
+                            if (cItem.isInv) categoryTotal += (Number(cItem.qty) * Number(cItem.price));
+                        });
+                    } else if (selectedRevenueCategory === 'Custom' && order.customItems) {
+                        categoryTitle = 'Custom Items Revenue Details';
+                        categoryColor = 'text-pink-400';
+                        order.customItems.forEach(cItem => {
+                            if (cItem.isCustom && !cItem.isInv) categoryTotal += (Number(cItem.qty) * Number(cItem.price));
+                        });
+                    }
+
+                    if (categoryTotal > 0) {
+                        detailsList.push({
+                            id: order.displayId || order.id,
+                            date: order.date,
+                            time: order.time,
+                            customer: order.customer?.name || 'Walk-in',
+                            amount: categoryTotal
+                        });
+                    }
+                });
+
+                const handleDownloadCategoryCSV = () => {
+                    if (detailsList.length === 0) return alert("No data to export.");
+                    const csvData = detailsList.map(d => ({
+                        "Order ID": d.id,
+                        "Date": d.date,
+                        "Time": d.time,
+                        "Customer": d.customer,
+                        [`${selectedRevenueCategory} Revenue`]: d.amount
+                    }));
+                    exportCSV(csvData, `${selectedRevenueCategory}_Revenue_${analyticsFilter}.csv`);
+                };
+
+                return (
+                    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                        <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-3xl border border-white/10 shadow-2xl relative max-h-[85vh] flex flex-col">
+                            <button onClick={() => setSelectedRevenueCategory(null)} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
+                            
+                            <div className="flex justify-between items-start mb-6 pr-8">
+                                <div>
+                                    <h3 className={`text-xl font-bold mb-1 ${categoryColor}`}>{categoryTitle}</h3>
+                                    <p className="text-xs text-gray-400">Showing specific revenue per order for current filter ({analyticsFilter}).</p>
+                                </div>
+                                <button onClick={handleDownloadCategoryCSV} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
+                            </div>
+
+                            <div className="overflow-y-auto flex-1 bg-black/20 rounded-xl border border-white/5">
+                                <table className="w-full text-left text-sm text-gray-400">
+                                    <thead className="bg-black/40 text-xs uppercase sticky top-0">
+                                        <tr>
+                                            <th className="p-4">Order ID</th>
+                                            <th className="p-4">Date & Time</th>
+                                            <th className="p-4">Customer</th>
+                                            <th className="p-4 text-right">Amount</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {detailsList.map((row, idx) => (
+                                            <tr key={idx} className="border-b border-white/5 hover:bg-white/5">
+                                                <td className="p-4 font-mono text-white">#{row.id}</td>
+                                                <td className="p-4 whitespace-nowrap">{row.date} <span className="text-[10px] text-gray-500">{row.time}</span></td>
+                                                <td className="p-4">{row.customer}</td>
+                                                <td className={`p-4 text-right font-bold ${categoryColor}`}>₹{row.amount}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                {detailsList.length === 0 && <div className="p-6 text-center text-gray-500 text-sm">No revenue found for this category.</div>}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
+
+            {/* --- PENDING PAYMENTS MODAL --- */}
+            {pendingModal && (
+                <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-4xl border border-white/10 shadow-2xl relative max-h-[85vh] flex flex-col">
+                        <button onClick={() => setPendingModal(false)} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
+                        
+                        <div className="mb-6">
+                            <h3 className="text-xl font-bold mb-1 text-red-400 flex items-center gap-2">⚠️ Pending Payments</h3>
+                            <p className="text-xs text-gray-400">Manage all orders with incomplete payments.</p>
+                        </div>
+                        
+                        <div className="overflow-y-auto flex-1 bg-black/20 rounded-xl border border-white/5">
+                            <table className="w-full text-left text-sm text-gray-400">
+                                <thead className="bg-black/40 text-xs uppercase sticky top-0 z-10">
+                                    <tr>
+                                        <th className="p-4">Order ID</th>
+                                        <th className="p-4">Date & Time</th>
+                                        <th className="p-4">Customer</th>
+                                        <th className="p-4">Amount</th>
+                                        <th className="p-4 text-center">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {orders.filter(o => o.paymentStatus === 'Pending').map(order => (
+                                        <tr key={order.id} className="border-b border-white/5 hover:bg-white/5">
+                                            <td className="p-4 font-mono text-white">#{order.displayId || order.id}</td>
+                                            <td className="p-4 whitespace-nowrap">{order.date} <span className="text-[10px] text-gray-500 block">{order.time}</span></td>
+                                            <td className="p-4 font-bold text-white">{order.customer?.name || 'Walk-in'} {order.customer?.phone && <span className="block text-[10px] text-gray-400 font-normal">{order.customer.phone}</span>}</td>
+                                            <td className="p-4 font-bold text-red-400">₹{order.total}</td>
+                                            <td className="p-4 text-center">
+                                                <button onClick={() => { 
+                                                    setPendingModal(false); 
+                                                    setEditHistoryModal({open: true, order: order, tempMethod: order.paymentMethod}); 
+                                                }} className="bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white px-4 py-2 rounded-lg text-xs font-bold transition shadow-lg whitespace-nowrap">
+                                                    Edit & Pay
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            {orders.filter(o => o.paymentStatus === 'Pending').length === 0 && <div className="p-10 text-center text-gray-500 text-sm font-bold">No pending payments! 🎉</div>}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* SIDEBAR */}
             {isSidebarOpen && (<div onClick={() => setIsSidebarOpen(false)} className="fixed inset-0 bg-black/80 z-40 md:hidden backdrop-blur-sm animate-fade-in"></div>)}
             <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 border-r border-white/10 p-6 flex flex-col transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}`}>
                 <div className="flex justify-between items-center mb-10"><div className="flex items-center gap-3"><div className="w-10 h-10 bg-cyan-500 rounded-lg flex items-center justify-center font-bold text-black text-xl">{appName.charAt(0).toUpperCase()}</div><div><h1 className="text-md font-bold font-serif tracking-wide">{appName.toUpperCase()}</h1></div></div><button onClick={() => setIsSidebarOpen(false)} className="md:hidden p-2 text-gray-400"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button></div>
-                <nav className="space-y-2 flex-1">
-                    <SidebarBtn icon="🧾" label="Create Bill" active={activeTab === 'create_bill'} onClick={() => { setActiveTab('create_bill'); setIsSidebarOpen(false); }} />
+               <nav className="space-y-2 flex-1 overflow-y-auto pr-2 scrollbar-hide">
                     <SidebarBtn icon="⚡" label="Live Orders" active={activeTab === 'orders'} onClick={() => { setActiveTab('orders'); setIsSidebarOpen(false); }} badge={pendingOrders} />
+                    <SidebarBtn icon="💸" label="Expense Mgmt" active={activeTab === 'expenses'} onClick={() => { setActiveTab('expenses'); setIsSidebarOpen(false); }} />
+                    <SidebarBtn icon="🛒" label="Stock Purchases" active={activeTab === 'purchases'} onClick={() => { setActiveTab('purchases'); setIsSidebarOpen(false); }} />    
+                    <SidebarBtn icon="🧑‍🍳" label="Operations & Staff" active={activeTab === 'staff'} onClick={() => { setActiveTab('staff'); setIsSidebarOpen(false); }} />
                     <SidebarBtn icon="📈" label="Analytics & Txns" active={activeTab === 'analytics'} onClick={() => { setActiveTab('analytics'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="👥" label="Users Info" active={activeTab === 'users'} onClick={() => { setActiveTab('users'); setIsSidebarOpen(false); }} />
                     <SidebarBtn icon="🍔" label="Menu Manager" active={activeTab === 'menu'} onClick={() => { setActiveTab('menu'); setIsSidebarOpen(false); }} />
+                    <SidebarBtn icon="📦" label="Inventory" active={activeTab === 'inventory'} onClick={() => { setActiveTab('inventory'); setIsSidebarOpen(false); }} />
                     <SidebarBtn icon="📸" label="Moments" active={activeTab === 'moments'} onClick={() => { setActiveTab('moments'); setIsSidebarOpen(false); }} />
                     <SidebarBtn icon="📊" label="History" active={activeTab === 'history'} onClick={() => { setActiveTab('history'); setIsSidebarOpen(false); }} />
+                    <SidebarBtn icon="👥" label="Users Info" active={activeTab === 'users'} onClick={() => { setActiveTab('users'); setIsSidebarOpen(false); }} />
                     <SidebarBtn icon="⚙️" label="Settings" active={activeTab === 'settings'} onClick={() => { setActiveTab('settings'); setIsSidebarOpen(false); }} />
                 </nav>
                 <button onClick={onLogout} className="mt-4 flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded-xl transition-all"><span className="text-sm font-bold">Logout</span></button>
             </aside>
 
             <div className="flex-1 flex flex-col h-screen overflow-hidden">
-                <header className="md:hidden bg-slate-900 border-b border-white/10 p-4 flex items-center justify-between z-30 sticky top-0"><button onClick={() => setIsSidebarOpen(true)} className="p-2 bg-white/10 rounded-lg"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg></button><span className="font-bold text-[22px] text-cyan-400 tracking-wide">{appName}</span><div className="w-10"></div></header>
-                <main className="flex-1 overflow-y-auto p-4 md:p-8 bg-slate-900">
+                <header className="md:hidden bg-slate-900 border-b border-white/10 p-4 flex items-center justify-between z-30 sticky top-0">
+                    <button onClick={() => setIsSidebarOpen(true)} className="p-2 bg-white/10 rounded-lg">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+                    </button>
+                    <span className="font-bold text-[22px] text-cyan-400 tracking-wide">{appName}</span>
                     
-                    {/* TAB: CREATE NEW BILL (POS) */}
-                    {activeTab === 'create_bill' && (
-                        <div className="max-w-6xl mx-auto space-y-6 pb-10">
-                            <h2 className="text-2xl font-bold">Create New Bill</h2>
-                            
-                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 lg:col-span-1 space-y-4 h-fit">
-                                    <h3 className="text-lg font-bold text-cyan-400 border-b border-white/10 pb-2">Customer Info</h3>
-                                    <div><label className="text-xs text-gray-400 mb-1 block">Name</label><input type="text" placeholder="Walk-in Customer" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billCustomerName} onChange={e=>setBillCustomerName(e.target.value)} /></div>
-                                    <div><label className="text-xs text-gray-400 mb-1 block">Phone Number</label><input type="text" placeholder="Optional" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billCustomerPhone} onChange={e=>setBillCustomerPhone(e.target.value)} /></div>
-                                    <div><label className="text-xs text-gray-400 mb-1 block">Table / Location</label><input type="text" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billTableNo} onChange={e=>setBillTableNo(e.target.value)} /></div>
-                                </div>
-
-                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 lg:col-span-2 space-y-6">
-                                    <h3 className="text-lg font-bold text-cyan-400 border-b border-white/10 pb-2">Add Items</h3>
-                                    
-                                    <div className="flex flex-col md:flex-row gap-3 relative">
-                                        <div className="flex-1 relative">
-                                            <input 
-                                                type="text" 
-                                                placeholder="Item Name (Search menu or type custom)" 
-                                                className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" 
-                                                value={billItemSearch} 
-                                                onChange={(e) => { 
-                                                    setBillItemSearch(e.target.value); 
-                                                    setSelectedMenuId(null); 
-                                                    setShowSuggestions(true); 
-                                                }} 
-                                                onFocus={() => setShowSuggestions(true)}
-                                                onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-                                            />
-                                            {showSuggestions && billItemSearch && (
-                                                <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-48 overflow-y-auto z-50">
-                                                    {menuItems.filter(i => i.name.toLowerCase().includes(billItemSearch.toLowerCase())).map(item => (
-                                                        <div key={item.id} onMouseDown={(e) => {
-                                                            e.preventDefault();
-                                                            handleSelectSuggestion(item);
-                                                        }} className="p-3 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between">
-                                                            <span>{item.name}</span>
-                                                            <span className="font-bold font-mono text-xs mt-1">{item.price}</span>
-                                                        </div>
-                                                    ))}
-                                                    {menuItems.filter(i => i.name.toLowerCase().includes(billItemSearch.toLowerCase())).length === 0 && (
-                                                        <div className="p-3 text-gray-400 text-xs italic">Press 'Add' to create as custom item</div>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-                                        <input type="number" placeholder="Price (₹)" className={`w-full md:w-28 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none ${selectedMenuId ? 'opacity-50 cursor-not-allowed' : ''}`} value={billItemPrice} onChange={e=>setBillItemPrice(e.target.value)} disabled={!!selectedMenuId} title={selectedMenuId ? "Auto-filled from menu" : "Enter custom price"} />
-                                        <input type="number" placeholder="Qty" className="w-full md:w-20 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={billItemQty} onChange={e=>setBillItemQty(e.target.value)} min="1" />
-                                        <button onClick={handleAddBillItem} className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-cyan-500/20">Add</button>
-                                    </div>
-
-                                    <div className="bg-black/20 rounded-lg border border-white/5 overflow-hidden overflow-x-auto">
-                                        <table className="w-full text-left text-sm text-gray-300 min-w-[450px]">
-                                            <thead className="bg-black/40 text-xs uppercase">
-                                                <tr>
-                                                    <th className="p-3">Item</th>
-                                                    <th className="p-3 text-right">Rate</th>
-                                                    <th className="p-3 text-center w-24">Qty</th>
-                                                    <th className="p-3 text-right">Total</th>
-                                                    <th className="p-3 text-center"></th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {billItemsList.map((item) => (
-                                                    <tr key={item.uniqueId} className="border-b border-white/5 last:border-0 hover:bg-white/5">
-                                                        <td className="p-3 text-white font-medium">{item.name} {!item.menuId && <span className="text-[9px] bg-cyan-500/20 text-cyan-400 px-1 rounded ml-1">CUSTOM</span>}</td>
-                                                        <td className="p-3 text-right text-gray-400">₹{item.price}</td>
-                                                        
-                                                        <td className="p-3 text-center">
-                                                            <div className="flex items-center justify-center gap-2">
-                                                                <button onClick={() => updateBillItemQty(item.uniqueId, item.qty - 1)} disabled={item.qty <= 1} className="w-6 h-6 rounded bg-slate-700 hover:bg-slate-600 text-white flex items-center justify-center transition disabled:opacity-50">-</button>
-                                                                <span className="font-bold w-4">{item.qty}</span>
-                                                                <button onClick={() => updateBillItemQty(item.uniqueId, item.qty + 1)} className="w-6 h-6 rounded bg-slate-700 hover:bg-slate-600 text-white flex items-center justify-center transition">+</button>
-                                                            </div>
-                                                        </td>
-
-                                                        <td className="p-3 text-right text-cyan-400 font-bold">₹{item.price * item.qty}</td>
-                                                        <td className="p-3 text-center"><button onClick={() => setBillItemsList(billItemsList.filter(i => i.uniqueId !== item.uniqueId))} className="text-red-400 hover:text-red-300 bg-red-500/10 p-1.5 rounded">✕</button></td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                        {billItemsList.length === 0 && <div className="text-center py-8 text-gray-500 text-sm">No items added to bill yet.</div>}
-                                    </div>
-
-                                    <div className="flex flex-col md:flex-row justify-between items-center pt-4 border-t border-white/10 gap-4">
-                                        <div className="text-lg text-gray-400">Grand Total: <span className="text-white font-bold text-3xl ml-2">₹{billItemsList.reduce((sum, i) => sum + (i.price * i.qty), 0)}</span></div>
-                                        <button onClick={handleCreateAndPrintBill} disabled={billItemsList.length === 0} className={`w-full md:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${billItemsList.length > 0 ? 'bg-green-500 text-black hover:bg-green-400 shadow-lg shadow-green-500/20' : 'bg-slate-700 text-gray-500 cursor-not-allowed'}`}>
-                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
-                                            Create & Print
-                                        </button>
-                                    </div>
-                                </div>
+                    <div className="flex items-center">
+                        <button 
+                            onClick={() => {
+                                window.OneSignalDeferred = window.OneSignalDeferred || [];
+                                window.OneSignalDeferred.push(function(OneSignal) {
+                                    OneSignal.Notifications.requestPermission();
+                                });
+                            }} 
+                            className="p-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500 hover:text-black transition"
+                            title="Enable Notifications"
+                        >
+                            🔔
+                        </button>
+                    </div>
+                </header>
+                
+                <main className="flex-1 overflow-y-auto p-4 md:p-8 bg-slate-900 relative">
+                    
+                    {/* GLOBAL BARCODE SCANNER (If an order is selected) */}
+                    {scanOrderId && (
+                        <div className="absolute top-0 left-0 w-full z-40 bg-blue-600 text-white p-4 shadow-xl flex items-center justify-between animate-slide-down">
+                            <div className="flex-1 max-w-xl mx-auto flex items-center gap-4">
+                                <span className="font-bold text-lg whitespace-nowrap hidden sm:block">📸 Scan Item to Order #{scanOrderId}</span>
+                                <form onSubmit={handleBarcodeSubmit} className="flex-1 flex gap-2">
+                                    <input 
+                                        ref={barcodeInputRef}
+                                        type="text" 
+                                        placeholder="Scan barcode or type & press Enter..." 
+                                        className="flex-1 bg-white/20 text-white placeholder-white/70 border border-white/30 rounded-lg px-4 py-2 outline-none focus:bg-white/30"
+                                        value={barcodeInput}
+                                        onChange={e => setBarcodeInput(e.target.value)}
+                                        autoFocus
+                                    />
+                                </form>
+                                <button onClick={() => setScanOrderId(null)} className="px-4 py-2 bg-black/30 rounded-lg font-bold hover:bg-black/50 transition">Done</button>
                             </div>
                         </div>
                     )}
 
+                    {/* --- TAB: PENDING PAYMENTS (NEW) --- */}
+                    {activeTab === 'pending_payments' && (
+                        <div className="max-w-4xl mx-auto space-y-4 pb-10">
+                            <div className="flex justify-between items-center mb-4">
+                                <div>
+                                    <h2 className="text-2xl font-bold text-yellow-400">Pending Payments</h2>
+                                    <p className="text-sm text-gray-400 mt-1">Orders that have been picked up/completed but not yet paid.</p>
+                                </div>
+                            </div>
+                            
+                            {pendingPaymentList.length === 0 && (
+                                <div className="text-center py-20 text-gray-500">
+                                    <span className="text-4xl block mb-4">🎉</span>
+                                    No pending payments! You are all caught up.
+                                </div>
+                            )}
+                            
+                            {pendingPaymentList.map(order => (
+                                <div key={order.id} className="bg-slate-800 p-5 rounded-xl border-l-4 border-yellow-500 shadow-lg">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <div>
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-2xl font-bold">Order #{order.displayId || order.id}</span>
+                                                <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-1 rounded">PAYMENT PENDING</span>
+                                            </div>
+                                            <p className="text-sm text-gray-400">Location: {order.tableNo} • {order.customer?.name} • {order.customer?.phone}</p>
+                                        </div>
+                                        <div className="flex flex-col items-end gap-2">
+                                            <span className="text-xl font-bold">₹{order.total}</span>
+                                            <button onClick={() => setAdminPaymentModal({ open: true, orderId: order.id, total: order.total })} className="bg-green-500 hover:bg-green-400 text-black px-6 py-2 rounded-lg font-bold shadow-lg shadow-green-500/20 transition whitespace-nowrap">
+                                                Collect Payment
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="text-xs text-gray-500 mt-2 pt-2 border-t border-white/5">
+                                        <span className="font-bold text-gray-400">Items: </span>
+                                        {order.item_names || "No items listed"}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* --- TAB: EXPENSE MANAGER --- */}
+                    {activeTab === 'expenses' && financials && (
+                        <div className="max-w-6xl mx-auto pb-10">
+                            <h2 className="text-2xl font-bold mb-6">Expense & Income Management</h2>
+                            
+                            <div className="mb-6 flex gap-4 items-center">
+                                <label className="text-sm font-bold text-gray-400">Select Date:</label>
+                                <input 
+                                    type="date" 
+                                    value={expenseDateFilter}
+                                    onChange={(e) => setExpenseDateFilter(e.target.value)}
+                                    className="bg-slate-800 border border-white/10 rounded-lg p-2 text-white focus:border-cyan-500 outline-none transition"
+                                />
+                            </div>
+
+                            {/* --- 3 MASTER CARDS --- */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                {/* CARD 1: TOTAL INCOME */}
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-t-4 border-t-green-500">
+                                    <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4">Total Income</h3>
+                                    <div className="space-y-3 mb-4">
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Cash Income</span>
+                                            <span className="font-bold text-green-400">₹{financials.lifetimeCashIn}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Online Income</span>
+                                            <span className="font-bold text-green-400">₹{financials.lifetimeOnlineIn}</span>
+                                        </div>
+                                    </div>
+                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end">
+                                        <span className="text-xs text-gray-500 uppercase font-bold">Total</span>
+                                        <span className="text-3xl font-black text-white leading-none">₹{financials.lifetimeCashIn + financials.lifetimeOnlineIn}</span>
+                                    </div>
+                                </div>
+
+                                {/* CARD 2: TOTAL OUTCOME */}
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-t-4 border-t-red-500">
+                                    <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4">Total Outcome</h3>
+                                    <div className="space-y-3 mb-4">
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Cash Outcome</span>
+                                            <span className="font-bold text-red-400">₹{financials.lifetimeCashOut}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Online Outcome</span>
+                                            <span className="font-bold text-red-400">₹{financials.lifetimeOnlineOut}</span>
+                                        </div>
+                                    </div>
+                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end">
+                                        <span className="text-xs text-gray-500 uppercase font-bold">Total</span>
+                                        <span className="text-3xl font-black text-white leading-none">₹{financials.lifetimeCashOut + financials.lifetimeOnlineOut}</span>
+                                    </div>
+                                </div>
+
+                                {/* CARD 3: REMAINING BALANCE */}
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-t-4 border-t-cyan-500 relative overflow-hidden">
+                                    <div className="absolute -right-6 -top-6 w-24 h-24 bg-cyan-500/10 rounded-full blur-xl"></div>
+                                    <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-widest mb-4">Remaining Balance</h3>
+                                    <div className="space-y-3 mb-4">
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Remaining Cash</span>
+                                            <span className="font-bold text-cyan-300">₹{financials.lifetimeCashRem}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Remaining Online</span>
+                                            <span className="font-bold text-cyan-300">₹{financials.lifetimeOnlineRem}</span>
+                                        </div>
+                                    </div>
+                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end">
+                                        <span className="text-xs text-cyan-500/50 uppercase font-bold">Total Net</span>
+                                        <span className="text-3xl font-black text-cyan-400 leading-none">₹{financials.lifetimeTotalRem}</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* DAILY SUMMARY TABLE */}
+                            <h3 className="text-xl font-bold mb-4">Daily Report ({financials.dateStr})</h3>
+                            <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto mb-8">
+                                <table className="w-full text-left text-sm text-gray-300 min-w-[900px]">
+                                    <thead className="bg-black/30 text-white uppercase text-xs">
+                                        <tr>
+                                            <th className="p-4">Date</th>
+                                            <th className="p-4">Initial Amount</th>
+                                            <th className="p-4 text-green-400">Online Income</th>
+                                            <th className="p-4 text-green-400">Cash Income</th>
+                                            <th className="p-4 text-red-400">Online Outcome</th>
+                                            <th className="p-4 text-red-400">Cash Outcome</th>
+                                            <th className="p-4 text-cyan-400 font-bold text-right">Remaining Amount</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr className="border-b border-white/5 hover:bg-white/5">
+                                            <td className="p-4 font-bold text-white">{financials.dateStr}</td>
+                                            <td className="p-4 font-mono font-bold text-gray-400">₹{financials.initialAmount}</td>
+                                            <td className="p-4 font-mono font-bold text-green-400">₹{financials.onlineIn}</td>
+                                            <td className="p-4 font-mono font-bold text-green-400">₹{financials.cashIn}</td>
+                                            <td className="p-4 font-mono font-bold text-red-400">₹{financials.onlineOut}</td>
+                                            <td className="p-4 font-mono font-bold text-red-400">₹{financials.cashOut}</td>
+                                            <td className="p-4 text-right font-mono font-black text-cyan-400 text-lg">₹{financials.totalRem}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg mb-8">
+                                <h3 className="text-lg font-bold mb-4">Add New Expense</h3>
+                                <form onSubmit={handleAddExpense} className="flex flex-col md:flex-row gap-4">
+                                    <input type="text" placeholder="Description (e.g., Maggie packets)" className="flex-1 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={expenseDesc} onChange={e => setExpenseDesc(e.target.value)} required />
+                                    <input type="number" placeholder="Amount (₹)" className="w-full md:w-32 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={expenseAmount} onChange={e => setExpenseAmount(e.target.value)} required min="1" />
+                                    <select value={expenseMode} onChange={e => setExpenseMode(e.target.value)} className="w-full md:w-32 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none">
+                                        <option value="Cash">Cash</option>
+                                        <option value="Online">Online</option>
+                                    </select>
+                                    <button type="submit" className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg whitespace-nowrap">Add Expense</button>
+                                </form>
+                            </div>
+
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="text-xl font-bold">Expense Ledger ({financials.dateStr})</h3>
+                                <button onClick={() => exportCSV(financials.dayExpenses.map(e => ({ Date: e.date, Time: e.time, Description: e.description, Mode: e.mode, Amount: e.amount })), `Expenses_${financials.dateStr.replace(/\//g,'_')}.csv`)} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
+                            </div>
+                            
+                            <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full max-w-[100vw] overflow-x-auto shadow-lg">
+                                <table className="w-full text-left text-sm text-gray-400 min-w-[600px]">
+                                    <thead className="bg-black/30 text-white uppercase text-xs">
+                                        <tr>
+                                            <th className="p-4">Time</th>
+                                            <th className="p-4">Description</th>
+                                            <th className="p-4">Mode</th>
+                                            <th className="p-4 text-right">Amount</th>
+                                            <th className="p-4 text-center">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {financials.dayExpenses.map(exp => (
+                                            <tr key={exp.id} className="border-b border-white/5 hover:bg-white/5">
+                                                <td className="p-4">{exp.time}</td>
+                                                <td className="p-4 text-white">{exp.description}</td>
+                                                <td className="p-4">
+                                                    <span className={`px-2 py-1 rounded text-xs font-bold ${exp.mode === 'Online' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>{exp.mode}</span>
+                                                </td>
+                                                <td className="p-4 text-red-400 font-bold text-right font-mono">-₹{exp.amount}</td>
+                                                <td className="p-4 text-center">
+                                                    <button onClick={() => deleteExpense(exp.id)} className="bg-red-500/20 text-red-400 p-2 rounded hover:bg-red-500 hover:text-white transition">🗑</button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                {financials.dayExpenses.length === 0 && <div className="text-center py-8 text-gray-500 text-sm">No expenses recorded for this date.</div>}
+                            </div>
+                        </div>
+                    )}
+
+                   {/* --- TAB: PURCHASES --- */}
+                    {activeTab === 'purchases' && (() => {
+                        // 1. Pre-fill all items from the Database
+                        // 1. Pre-fill ONLY Inventory items from the Database
+                        const groupedPurchases = {};
+                        
+                        inventoryItems.forEach(item => {
+                            groupedPurchases[item.name] = { name: item.name, type: 'Inventory', totalQty: 0, totalSpent: 0 };
+                        });
+
+                        // 2. Add actual purchase history data (This will add your custom Food ingredients!)
+                        purchasesData.forEach(curr => {
+                            if (!groupedPurchases[curr.item_name]) {
+                                groupedPurchases[curr.item_name] = { name: curr.item_name, type: curr.purchase_type, totalQty: 0, totalSpent: 0 };
+                            }
+                            groupedPurchases[curr.item_name].totalQty += Number(curr.qty);
+                            groupedPurchases[curr.item_name].totalSpent += Number(curr.total_cost);
+                        });
+
+                       // 3. Convert to array and sort alphabetically A-Z
+                        const groupedPurchasesArray = Object.values(groupedPurchases).sort((a, b) => a.name.localeCompare(b.name));
+
+                        // 4. Apply Filters & Search
+                        const filteredPurchasesArray = groupedPurchasesArray.filter(item => {
+                            const matchesType = purchaseTabFilter === 'All' || item.type === purchaseTabFilter;
+                            const matchesSearch = item.name.toLowerCase().includes(purchaseSearchQuery.toLowerCase());
+                            return matchesType && matchesSearch;
+                        });
+
+                        return (
+                            <div className="max-w-6xl mx-auto pb-10">
+                                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                                    <div>
+                                        <h2 className="text-2xl font-bold text-green-400">Stock Purchases</h2>
+                                        <p className="text-sm text-gray-400 mt-1">Record items bought. Inventory purchases automatically add to your stock.</p>
+                                    </div>
+                                    <button onClick={() => setPurchaseModal({open: true})} className="bg-green-500 text-black px-6 py-2.5 rounded-xl font-bold shadow-lg hover:bg-green-400 transition whitespace-nowrap">+ Record Purchase</button>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-yellow-500">
+                                        <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Food Expenses</p>
+                                        <p className="text-3xl font-black text-white mt-1">₹{purchasesData.filter(p => p.purchase_type === 'Food').reduce((acc, curr) => acc + Number(curr.total_cost), 0)}</p>
+                                    </div>
+                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
+                                        <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Inventory Expenses</p>
+                                        <p className="text-3xl font-black text-white mt-1">₹{purchasesData.filter(p => p.purchase_type === 'Inventory').reduce((acc, curr) => acc + Number(curr.total_cost), 0)}</p>
+                                    </div>
+                                </div>
+
+                                {/* NEW: FILTERS & SEARCH BAR */}
+                                <div className="flex flex-col md:flex-row gap-4 mb-6 border-b border-white/10 pb-4">
+                                    <div className="flex gap-2">
+                                        {[ 'Food', 'Inventory'].map(f => (
+                                            <button key={f} onClick={() => setPurchaseTabFilter(f)} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${purchaseTabFilter === f ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700'}`}>
+                                                {f === 'All' ? 'All Items' : f}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <div className="relative flex-1">
+                                        <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">🔍</span>
+                                        <input 
+                                            type="text" 
+                                            placeholder="Search items..." 
+                                            value={purchaseSearchQuery}
+                                            onChange={(e) => setPurchaseSearchQuery(e.target.value)}
+                                            className="w-full bg-slate-800 border border-white/10 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:border-cyan-500 outline-none transition"
+                                        />
+                                        {purchaseSearchQuery && ( <button onClick={() => setPurchaseSearchQuery("")} className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-white">✕</button> )}
+                                    </div>
+                                </div>
+
+                                {/* CARDS GRID */}
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    {filteredPurchasesArray.map(item => (
+                                        <div key={item.name} onClick={() => setSelectedPurchaseItem(item.name)} className="bg-slate-800 p-5 rounded-xl border border-white/10 hover:border-cyan-500 cursor-pointer shadow-lg transition hover:-translate-y-1 flex flex-col">
+                                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded mb-3 inline-block w-fit ${item.type === 'Food' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400'}`}>{item.type}</span>
+                                            <h3 className="font-bold text-white text-lg truncate mb-2">{item.name}</h3>
+                                            <div className="flex justify-between items-end mt-auto pt-4 border-t border-white/5">
+                                                <div>
+                                                    <p className="text-[10px] text-gray-500 uppercase">Total Qty</p>
+                                                    <p className="font-bold text-white">{item.totalQty}</p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <p className="text-[10px] text-gray-500 uppercase">Total Spent</p>
+                                                    <p className="font-bold text-red-400">₹{item.totalSpent}</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {filteredPurchasesArray.length === 0 && <div className="col-span-full text-center py-10 text-gray-500">No items match your search.</div>}
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+               {/* --- TAB: STAFF & OPERATIONS (MERGED) --- */}
+                    {activeTab === 'staff' && (
+                        <div className="max-w-7xl mx-auto pb-10">
+                            
+                            {/* --- TOP SUB-TAB TOGGLE --- */}
+                            <div className="flex bg-slate-800 p-1.5 rounded-xl border border-white/10 w-fit mb-8 shadow-lg">
+                                <button 
+                                    onClick={() => setOpsTab('staff')}
+                                    className={`px-8 py-2.5 rounded-lg text-sm font-bold transition-all ${opsTab === 'staff' ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'text-gray-400 hover:text-white'}`}
+                                >
+                                    🧑‍🍳 Staff Accounts
+                                </button>
+                                <button 
+                                    onClick={() => setOpsTab('missing')}
+                                    className={`px-8 py-2.5 rounded-lg text-sm font-bold transition-all ${opsTab === 'missing' ? 'bg-orange-500 text-white shadow-lg shadow-orange-500/20' : 'text-gray-400 hover:text-white'}`}
+                                >
+                                    ⚠️ Missing & Defective
+                                </button>
+                            </div>
+
+                            {/* --- PART 1: STAFF ACCOUNTS --- */}
+                            {opsTab === 'staff' && (
+                                <div className="animate-fade-in space-y-6">
+                                    <div className="mb-2">
+                                        <h2 className="text-2xl font-bold">Staff Accounts & Deductions</h2>
+                                        <p className="text-sm text-gray-400">Manage staff advances, meals, and salary deductions.</p>
+                                    </div>
+                                    <div className="flex flex-col md:flex-row gap-6">
+                                        {/* LEFT SIDEBAR: STAFF MEMBERS */}
+                                        <div className="w-full md:w-1/3 space-y-4">
+                                            <div className="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-white/10 shadow-lg">
+                                                <h2 className="text-lg font-bold">Team Members</h2>
+                                                <button onClick={() => setStaffModal({open: true})} className="bg-cyan-500 text-black px-3 py-1.5 rounded-lg text-xs font-bold shadow-lg hover:bg-cyan-400 transition">+ Record</button>
+                                            </div>
+                                            <div className="bg-slate-800 rounded-xl border border-white/10 p-2 overflow-hidden shadow-lg">
+                                                {uniqueStaffNames.length === 0 ? (
+                                                    <div className="p-4 text-center text-sm text-gray-500 italic">No staff records yet.</div>
+                                                ) : (
+                                                    <div className="flex flex-col">
+                                                        {uniqueStaffNames.map(staff => (
+                                                            <button 
+                                                                key={staff} 
+                                                                onClick={() => setActiveStaff(staff)}
+                                                                className={`w-full flex justify-between items-center p-3 rounded-lg transition-all ${activeStaff === staff ? 'bg-cyan-500 text-black font-bold shadow-lg shadow-cyan-500/20' : 'text-gray-400 hover:bg-white/5 hover:text-white'}`}
+                                                            >
+                                                                <span className="truncate pr-2">{staff}</span>
+                                                                <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded-full ${activeStaff === staff ? 'bg-black/20 text-black' : 'bg-red-500/20 text-red-400'}`}>
+                                                                    -₹{staffTotals[staff]}
+                                                                </span>
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* RIGHT SIDE: SELECTED STAFF DETAILS */}
+                                        <div className="w-full md:w-2/3">
+                                            {activeStaff ? (
+                                                <>
+                                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg mb-6 flex justify-between items-center">
+                                                        <div>
+                                                            <p className="text-gray-400 text-xs font-bold uppercase tracking-widest">Total Deduction Due</p>
+                                                            <h3 className="text-3xl font-black text-red-400 mt-1">-₹{staffTotals[activeStaff]}</h3>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <h2 className="text-xl font-bold text-white uppercase">{activeStaff}</h2>
+                                                            <p className="text-xs text-gray-500 mt-1">Items taken / Advance consumed</p>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
+                                                        <table className="w-full text-left text-sm text-gray-400 min-w-[600px]">
+                                                            <thead className="bg-black/30 text-white uppercase text-xs">
+                                                                <tr>
+                                                                    <th className="p-4">Date & Time</th>
+                                                                    <th className="p-4">Item Taken</th>
+                                                                    <th className="p-4 text-center">Qty</th>
+                                                                    <th className="p-4 text-right">Rate</th>
+                                                                    <th className="p-4 text-right">Total</th>
+                                                                    <th className="p-4"></th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {staffExpenses.filter(se => se.staff_name === activeStaff).map(exp => (
+                                                                    <tr key={exp.id} className="border-b border-white/5 hover:bg-white/5">
+                                                                        <td className="p-4 whitespace-nowrap">{exp.date} <span className="text-xs text-gray-500">{exp.time}</span></td>
+                                                                        <td className="p-4 text-white font-medium">
+                                                                            {exp.item_name}
+                                                                            {exp.is_inv && <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded" title="Deducted from Inventory">📦</span>}
+                                                                        </td>
+                                                                        <td className="p-4 text-center font-bold">{exp.qty}x</td>
+                                                                        <td className="p-4 text-right text-gray-500 text-xs">@₹{exp.price}</td>
+                                                                        <td className="p-4 text-red-400 font-bold text-right font-mono">-₹{exp.total}</td>
+                                                                        <td className="p-4 text-center">
+                                                                            <button onClick={() => deleteStaffExpense(exp.id)} className="text-gray-600 hover:text-red-400 transition" title="Delete Record">✕</button>
+                                                                        </td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                        {staffExpenses.filter(se => se.staff_name === activeStaff).length === 0 && <div className="text-center py-8 text-gray-500 text-sm">No expenses recorded for {activeStaff}.</div>}
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div className="h-full min-h-[300px] flex flex-col items-center justify-center text-gray-500 bg-slate-800/50 rounded-xl border border-white/5 border-dashed">
+                                                    <span className="text-4xl mb-4">🧑‍🍳</span>
+                                                    <p>Select a staff member from the list to view details.</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* --- PART 2: MISSING & DEFECTIVE ITEMS --- */}
+                            {opsTab === 'missing' && (
+                                <div className="animate-fade-in space-y-6">
+                                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-2">
+                                        <div>
+                                            <h2 className="text-2xl font-bold text-orange-400">Missing & Defective Tracker</h2>
+                                            <p className="text-sm text-gray-400 mt-1">Track lost, damaged, or expired stock. Automatically deducts from inventory.</p>
+                                        </div>
+                                        <button onClick={() => setMissingModal({open: true})} className="bg-orange-500 text-white px-6 py-2.5 rounded-xl font-bold shadow-lg hover:bg-orange-400 transition whitespace-nowrap">+ Record Loss/Defect</button>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg flex items-center justify-between border-l-4 border-l-orange-500">
+                                            <div>
+                                                <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Value Missing</p>
+                                                <p className="text-3xl font-black text-white mt-1">₹{missingItemsData.filter(i => (i.type || 'Missing') === 'Missing').reduce((acc, curr) => acc + Number(curr.total), 0)}</p>
+                                            </div>
+                                            <div className="text-4xl opacity-50">❓</div>
+                                        </div>
+                                        <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg flex items-center justify-between border-l-4 border-l-red-500">
+                                            <div>
+                                                <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Value Defective</p>
+                                                <p className="text-3xl font-black text-white mt-1">₹{missingItemsData.filter(i => i.type === 'Defective').reduce((acc, curr) => acc + Number(curr.total), 0)}</p>
+                                            </div>
+                                            <div className="text-4xl opacity-50">💔</div>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
+                                        <table className="w-full text-left text-sm text-gray-400 min-w-[700px]">
+                                            <thead className="bg-black/30 text-white uppercase text-xs">
+                                                <tr>
+                                                    <th className="p-4">Date & Time</th>
+                                                    <th className="p-4">Type</th>
+                                                    <th className="p-4">Item Name</th>
+                                                    <th className="p-4 text-center">Qty Lost</th>
+                                                    <th className="p-4 text-right">Total Loss</th>
+                                                    <th className="p-4 text-center">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {missingItemsData.map(item => (
+                                                    <tr key={item.id} className="border-b border-white/5 hover:bg-white/5">
+                                                        <td className="p-4 whitespace-nowrap">{item.date} <span className="text-xs text-gray-500 block">{item.time}</span></td>
+                                                        <td className="p-4">
+                                                            <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${item.type === 'Defective' ? 'bg-red-500/20 text-red-400' : 'bg-orange-500/20 text-orange-400'}`}>
+                                                                {item.type || 'Missing'}
+                                                            </span>
+                                                        </td>
+                                                        <td className="p-4 text-white font-medium">
+                                                            {item.item_name}
+                                                            {item.is_inv && <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded" title="Deducted from Inventory">📦</span>}
+                                                        </td>
+                                                        <td className="p-4 text-center font-bold text-gray-300">{item.qty}</td>
+                                                        <td className="p-4 text-orange-400 font-bold text-right font-mono">₹{item.total}</td>
+                                                        <td className="p-4 text-center">
+                                                            <button onClick={() => deleteMissingItem(item.id)} className="bg-red-500/10 text-red-400 p-2 rounded hover:bg-red-50 hover:text-white transition">🗑</button>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                        {missingItemsData.length === 0 && <div className="text-center py-10 text-gray-500 font-bold">No items recorded yet. Great!</div>}
+                                    </div>
+                                </div>
+                            )}
+
+                        </div>
+                    )}
+
+             {/* --- TAB: INVENTORY MANAGER --- */}
+                {activeTab === 'inventory' && (
+                    <div className="max-w-7xl mx-auto pb-10">
+                        
+                        {/* --- WHATSAPP LOW STOCK DISPATCHER CARD (ONLY ON INVENTORY PAGE) --- */}
+                        <div className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-l-4 border-l-green-500">
+                            <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xl">💬</span>
+                                    <h3 className="font-bold text-white text-base">WhatsApp Low Stock Dispatcher</h3>
+                                </div>
+                                <p className="text-xs text-gray-400">
+                                    Low Stock Items (<span className="text-yellow-400 font-bold">≤5 qty</span>): {' '}
+                                    <span className="text-white font-bold">
+                                        {inventoryItems.filter(i => i.stock <= 5).length > 0 
+                                            ? inventoryItems.filter(i => i.stock <= 5).map(i => `${i.name} (${i.stock})`).join(', ') 
+                                            : 'All items well-stocked! 🎉'}
+                                    </span>
+                                </p>
+                            </div>
+
+                            <div className="flex items-center gap-3 w-full md:w-auto">
+                                {isEditingWa ? (
+                                    <div className="flex gap-2 w-full md:w-auto">
+                                        <input 
+                                            type="text" 
+                                            placeholder="e.g. 919876543210" 
+                                            value={personalWaNumber} 
+                                            onChange={(e) => setPersonalWaNumber(e.target.value)}
+                                            className="bg-black/50 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-green-500"
+                                        />
+                                        <button onClick={() => { localStorage.setItem('personal_wa_number', personalWaNumber); setIsEditingWa(false); }} className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold">Save</button>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs text-gray-400">To: <strong className="text-white">{personalWaNumber || 'No number set'}</strong></span>
+                                        <button onClick={() => setIsEditingWa(true)} className="text-xs text-cyan-400 underline hover:text-cyan-300">Edit</button>
+                                    </div>
+                                )}
+
+                                <button 
+                                    onClick={() => {
+                                        if (!personalWaNumber) {
+                                            alert("Please set your personal WhatsApp number first!");
+                                            setIsEditingWa(true);
+                                            return;
+                                        }
+                                        const lowItems = inventoryItems.filter(i => i.stock <= 5);
+                                        if (lowItems.length === 0) {
+                                            alert("No low stock items to report right now!");
+                                            return;
+                                        }
+                                        let msg = "🚨 *HOTEL INVENTORY REFILL ALERT* 🚨\n\nThe following items are running low and need to be refilled:\n\n";
+                                        lowItems.forEach(i => {
+                                            msg += `• *${i.name}* - Left: *${i.stock}* units\n`;
+                                        });
+                                        msg += "\nPlease arrange stock updates accordingly.";
+                                        
+                                        const url = `https://wa.me/${personalWaNumber}?text=${encodeURIComponent(msg)}`;
+                                        window.open(url, '_blank');
+                                    }}
+                                    className="bg-green-600 hover:bg-green-500 text-white px-5 py-2.5 rounded-xl font-bold text-xs transition shadow-lg whitespace-nowrap flex items-center gap-2"
+                                >
+                                    <span>📲 Send WhatsApp Alert</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Inventory Header & Controls */}
+                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                            <h2 className="text-2xl font-bold">Inventory Manager</h2>
+                            <button onClick={() => setInvModal({open: true, mode: 'add', data: null})} className="bg-cyan-500 text-black px-4 py-2 rounded-xl font-bold hover:bg-cyan-400 transition">+ Add Item</button>
+                        </div>
+                        
+                        <div className="mb-6">
+                            <input 
+                                type="text" 
+                                placeholder="Search inventory items or barcodes..." 
+                                value={inventorySearchQuery} 
+                                onChange={(e) => setInventorySearchQuery(e.target.value)} 
+                                className="w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-cyan-500 outline-none" 
+                            />
+                        </div>
+
+                        <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
+                            <table className="w-full text-left text-sm text-gray-400 min-w-[700px]">
+                                <thead className="bg-black/30 text-white uppercase text-xs">
+                                    <tr>
+                                        <th className="p-4">Item Name</th>
+                                        <th className="p-4">Barcode / SKU</th>
+                                        <th className="p-4 text-center">Stock</th>
+                                        <th className="p-4 text-right">Price</th>
+                                        <th className="p-4 text-center">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {filteredInventory.map(item => (
+                                        <tr key={item.id} className="border-b border-white/5 hover:bg-white/5">
+                                            <td className="p-4 font-bold text-white">{item.name}</td>
+                                            <td className="p-4 font-mono text-xs text-gray-500">{item.barcode}</td>
+                                            <td className="p-4 text-center">
+                                                <span className={`px-2 py-1 rounded text-xs font-bold ${item.stock <= 5 ? 'bg-red-500/20 text-red-400 animate-pulse' : 'bg-green-500/20 text-green-400'}`}>
+                                                    {item.stock} units
+                                                </span>
+                                            </td>
+                                            <td className="p-4 text-right font-mono text-cyan-400">₹{item.price}</td>
+                                            <td className="p-4 text-center flex justify-center gap-2">
+                                                <button onClick={() => setInvModal({open: true, mode: 'edit', data: item})} className="bg-blue-500/20 text-blue-400 p-2 rounded hover:bg-blue-500 hover:text-white transition">✏️</button>
+                                                <button onClick={() => deleteInventoryItem(item.id)} className="bg-red-500/20 text-red-400 p-2 rounded hover:bg-red-500 hover:text-white transition">🗑</button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            {filteredInventory.length === 0 && <div className="text-center py-10 text-gray-500">No inventory items found.</div>}
+                        </div>
+                    </div>
+                )}
+                
                     {/* TAB: LIVE ORDERS */}
                     {activeTab === 'orders' && ( 
                         <div className="max-w-4xl mx-auto space-y-4">
-                            <h2 className="text-2xl font-bold mb-4">Live Orders</h2>
+                            <div className="flex justify-between items-center mb-4">
+                                <h2 className="text-2xl font-bold">Live Orders</h2>
+                                <button onClick={() => setCreateBillModal(true)} className="bg-cyan-500 hover:bg-cyan-400 text-black px-4 py-2 rounded-xl font-bold shadow-lg shadow-cyan-500/20 transition">+ Create Bill</button>
+                            </div>
+                            
                             {getFilteredLiveOrders().length === 0 && <div className="text-center py-20 text-gray-500">No active orders</div>}
                             
                             {getFilteredLiveOrders().map(order => {
@@ -1047,12 +3475,12 @@ function AdminDashboard({ onLogout }) {
                                     return { key: `menu_${id}`, name: mItem?.name || 'Item', qty: qty, price: mItem?.price, menuId: id, isCustom: false };
                                 });
                                 const customItems = (order.customItems || []).map(cItem => ({
-                                    key: cItem.id, name: cItem.name, qty: cItem.qty, price: cItem.price, isCustom: true
+                                    key: cItem.id, name: cItem.name, qty: cItem.qty, price: cItem.price, isCustom: true, isInv: cItem.isInv, invId: cItem.invId
                                 }));
                                 const allItemsToRender = [...regularItems, ...customItems];
 
                                 return (
-                                    <div key={order.id} className={`bg-slate-800 p-5 rounded-xl border-l-4 shadow-lg ${order.status === 'Received' ? 'border-yellow-500' : 'border-green-500'}`}>
+                                    <div key={order.id} className={`bg-slate-800 p-5 rounded-xl border-l-4 shadow-lg ${order.status === 'Received' ? 'border-yellow-500' : 'border-green-500'} ${scanOrderId === order.id ? 'ring-2 ring-blue-500 scale-[1.01] transition-all' : ''}`}>
                                         <div className="flex justify-between items-start mb-4">
                                             <div>
                                                 <div className="flex items-center gap-3">
@@ -1062,7 +3490,12 @@ function AdminDashboard({ onLogout }) {
                                                 <p className="text-sm text-gray-400">Location: {order.tableNo} • {order.customer?.name} • {order.customer?.phone}</p>
                                                 {order.paymentId && <p className="text-[10px] text-cyan-400 mt-1 font-mono">Txn ID: {order.paymentId}</p>}
                                             </div>
-                                            <div className="text-right"><span className="text-xl font-bold">₹{order.total}</span></div>
+                                            <div className="flex flex-col items-end gap-2">
+                                                <span className="text-xl font-bold">₹{order.total}</span>
+                                                <button onClick={() => setScanOrderId(scanOrderId === order.id ? null : order.id)} className={`text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1 transition ${scanOrderId === order.id ? 'bg-blue-600 text-white shadow-lg' : 'bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white'}`}>
+                                                    📷 {scanOrderId === order.id ? 'Scanning...' : 'Scan Item'}
+                                                </button>
+                                            </div>
                                         </div>
 
                                         {/* ITEMS RENDERED WITH CHECKBOXES AND QUANTITY EDITORS */}
@@ -1078,7 +3511,8 @@ function AdminDashboard({ onLogout }) {
                                                             >✓</button>
                                                             <span className={`${isReady ? 'line-through text-gray-500' : 'text-white'}`}>
                                                                 {item.name} 
-                                                                {item.isCustom && <span className="text-[8px] bg-cyan-500/20 text-cyan-400 px-1 rounded ml-2">CUSTOM</span>}
+                                                                {item.isInv && <span className="text-[8px] bg-blue-500/20 text-blue-400 px-1 rounded ml-2" title="Inventory Item">📦</span>}
+                                                                {item.isCustom && !item.isInv && <span className="text-[8px] bg-cyan-500/20 text-cyan-400 px-1 rounded ml-2">CUSTOM</span>}
                                                             </span>
                                                         </div>
                                                         <div className="flex flex-col items-end gap-1">
@@ -1129,22 +3563,27 @@ function AdminDashboard({ onLogout }) {
                                                             />
                                                             {showSuggestions && customItemForm.name && (
                                                                 <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
-                                                                    {menuItems.filter(i => i.name.toLowerCase().includes(customItemForm.name.toLowerCase())).map(item => (
-                                                                        <div key={item.id} onMouseDown={(e) => {
-                                                                            e.preventDefault();
-                                                                            setCustomItemForm({
-                                                                                ...customItemForm,
-                                                                                name: item.name,
-                                                                                price: parseInt(item.price.replace(/[^0-9]/g, '')) || 0,
-                                                                                menuId: item.id
-                                                                            });
-                                                                            setShowSuggestions(false);
-                                                                        }} className="p-2 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between text-xs">
-                                                                            <span>{item.name}</span>
-                                                                            <span className="font-bold font-mono">{item.price}</span>
-                                                                        </div>
-                                                                    ))}
-                                                                    {menuItems.filter(i => i.name.toLowerCase().includes(customItemForm.name.toLowerCase())).length === 0 && (
+                                                                    {combinedCustomSuggestions.map(item => {
+                                                                        const isInv = item.barcode !== undefined;
+                                                                        return (
+                                                                            <div key={isInv ? `inv_${item.id}` : `menu_${item.id}`} onMouseDown={(e) => {
+                                                                                e.preventDefault();
+                                                                                setCustomItemForm({
+                                                                                    ...customItemForm,
+                                                                                    name: item.name,
+                                                                                    price: parseInt(String(item.price).replace(/[^0-9]/g, '')) || 0,
+                                                                                    menuId: isInv ? null : item.id,
+                                                                                    invId: isInv ? item.id : null,
+                                                                                    isInv: isInv
+                                                                                });
+                                                                                setShowSuggestions(false);
+                                                                            }} className="p-2 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between text-xs">
+                                                                                <span>{item.name} {isInv && <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded" title="Inventory Item">📦 In Stock: {item.stock}</span>}</span>
+                                                                                <span className="font-bold font-mono">₹{item.price}</span>
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                    {combinedCustomSuggestions.length === 0 && (
                                                                         <div className="p-2 text-gray-400 text-[10px] italic">Custom item will be created</div>
                                                                     )}
                                                                 </div>
@@ -1152,15 +3591,15 @@ function AdminDashboard({ onLogout }) {
                                                         </div>
                                                         <div className="flex gap-2">
                                                             <input type="number" placeholder="Qty" className="bg-slate-800 text-xs p-2 rounded text-white outline-none w-16" value={customItemForm.qty} onChange={e => setCustomItemForm({...customItemForm, qty: e.target.value})} min="1" />
-                                                            <input type="number" placeholder="Total Rate/ea (₹)" className={`bg-slate-800 text-xs p-2 rounded text-white outline-none flex-1 ${customItemForm.menuId ? 'opacity-50 cursor-not-allowed' : ''}`} value={customItemForm.price} onChange={e => setCustomItemForm({...customItemForm, price: e.target.value})} disabled={!!customItemForm.menuId} />
+                                                            <input type="number" placeholder="Total Rate/ea (₹)" className={`bg-slate-800 text-xs p-2 rounded text-white outline-none flex-1 ${customItemForm.menuId || customItemForm.invId ? 'opacity-50 cursor-not-allowed' : ''}`} value={customItemForm.price} onChange={e => setCustomItemForm({...customItemForm, price: e.target.value})} disabled={!!customItemForm.menuId || !!customItemForm.invId} />
                                                         </div>
                                                         <div className="flex gap-2">
-                                                            <button onClick={() => setAddingItemTo(null)} className="flex-1 text-xs py-2 bg-red-500/20 text-red-400 rounded hover:bg-red-500 hover:text-white transition">Cancel</button>
+                                                            <button onClick={() => { setAddingItemTo(null); setCustomItemForm({name: '', qty: 1, price: '', menuId: null, invId: null, isInv: false}); }} className="flex-1 text-xs py-2 bg-red-500/20 text-red-400 rounded hover:bg-red-500 hover:text-white transition">Cancel</button>
                                                             <button onClick={() => handleAddCustomItem(order.id)} className="flex-1 text-xs py-2 bg-cyan-500 text-black font-bold rounded hover:bg-cyan-400 transition">Add Item</button>
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <button onClick={() => { setAddingItemTo(order.id); setCustomItemForm({name: '', qty: 1, price: '', menuId: null}); }} className="w-full text-xs text-cyan-400 hover:bg-cyan-500/10 py-2 border border-dashed border-cyan-500/30 rounded transition">+ Add Item to Order</button>
+                                                    <button onClick={() => { setAddingItemTo(order.id); setCustomItemForm({name: '', qty: 1, price: '', menuId: null, invId: null, isInv: false}); }} className="w-full text-xs text-cyan-400 hover:bg-cyan-500/10 py-2 border border-dashed border-cyan-500/30 rounded transition">+ Add Item to Order</button>
                                                 )}
                                             </div>
                                         </div>
@@ -1170,32 +3609,24 @@ function AdminDashboard({ onLogout }) {
                                             
                                             {order.status === 'Preparing' && <button onClick={() => updateOrder(order.id, {status: 'Ready'})} className="bg-green-600 px-6 py-3 rounded-lg font-bold flex-1">Ready</button>}
                                             
-                                            {order.status === 'Ready' && (
-                                                <button onClick={() => updateOrder(order.id, {status: 'Picked Up'})} disabled={order.paymentStatus !== 'Paid'} className={`px-6 py-3 rounded-lg font-bold flex-1 transition-all ${order.paymentStatus === 'Paid' ? 'bg-slate-600 hover:bg-slate-500 text-white shadow-lg' : 'bg-slate-800 text-gray-500 cursor-not-allowed border border-white/5'}`}>
-                                                    {order.paymentStatus === 'Paid' ? 'Complete' : 'Needs Payment'}
-                                                </button>
-                                            )}
+                                           {order.status === 'Ready' && (
+    <button 
+        onClick={() => updateOrder(order.id, {status: 'Picked Up'})} 
+        className={`px-6 py-3 rounded-lg font-bold flex-1 transition-all ${
+            order.paymentStatus === 'Paid' 
+                ? 'bg-slate-600 hover:bg-slate-500 text-white shadow-lg' 
+                : 'bg-yellow-500 hover:bg-yellow-400 text-black shadow-lg'
+        }`}
+    >
+        {order.paymentStatus === 'Paid' ? 'Complete' : 'Complete (Pending)'}
+    </button>
+)}
 
                                             {(order.paymentStatus === 'Pending' || !order.paymentStatus) && ( 
-                                                <button onClick={() => setAdminPaymentModal({ open: true, orderId: order.id })} className="bg-green-900/50 text-green-400 px-4 py-2 rounded-lg text-sm border border-green-500/30 hover:bg-green-500 hover:text-black transition">
+                                                <button onClick={() => setAdminPaymentModal({ open: true, orderId: order.id, total: order.total })} className="bg-green-900/50 text-green-400 px-4 py-2 rounded-lg text-sm border border-green-500/30 hover:bg-green-500 hover:text-black transition">
                                                     Mark Paid
                                                 </button> 
                                             )}
-
-                                            {/* WHATSAPP PDF BUTTON */}
-                                            {order.paymentStatus === 'Paid' && (
-                                                <button onClick={(e) => sendWhatsAppPDF(order, e)} className="bg-[#25D366] hover:bg-green-600 text-white px-4 py-3 rounded-lg font-bold transition flex items-center justify-center gap-2" title="Share Bill as PDF">
-                                                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 00-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
-                                                </button>
-                                            )}
-                                            
-                                            <button onClick={() => printBill(order)} className="bg-slate-700 hover:bg-white hover:text-black px-4 py-3 rounded-lg font-bold transition flex items-center justify-center gap-2" title="Print Bill">
-                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
-                                            </button>
-
-                                            <button onClick={() => deleteOrder(order.id)} className="bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white px-4 py-3 rounded-lg font-bold transition flex items-center justify-center gap-2" title="Delete Order">
-                                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                                            </button>
                                         </div>
                                     </div> 
                                 );
@@ -1203,97 +3634,189 @@ function AdminDashboard({ onLogout }) {
                         </div> 
                     )}
 
-                    {/* --- ADVANCED ANALYTICS & TRANSACTIONS TAB --- */}
-                    {activeTab === 'analytics' && ( 
-                        <div className="max-w-6xl mx-auto pb-10">
-                            <h2 className="text-2xl font-bold mb-6">Sales & Transactions</h2>
+                  {/* --- ADVANCED ANALYTICS & TRANSACTIONS TAB --- */}
+                    {activeTab === 'analytics' && (() => {
+                        // Calculate separate Cash and Online totals based on the current filter
+                        let totalCash = 0;
+                        let totalOnline = 0;
+                        let totalFoodRevenue = 0;
+                        let totalInvRevenue = 0;
+                        let totalCustomRevenue = 0;
+                        
+                        filteredTxns.forEach(order => {
+                            // 1. Calculate Cash / Online Split
+                            const pm = String(order.paymentMethod || 'Cash').toLowerCase();
+                            if (pm === 'split') {
+                                totalCash += Number(order.splitAmounts?.cash || 0);
+                                totalOnline += Number(order.splitAmounts?.online || 0);
+                            } else if (pm.includes('online') || pm.includes('upi') || pm.includes('card')) {
+                                totalOnline += Number(order.total || 0);
+                            } else {
+                                totalCash += Number(order.total || 0);
+                            }
+
+                            // 2. Calculate Revenue by Item Category
+                            // A. Regular Food/Menu Items
+                            if (order.items) {
+                                Object.entries(order.items).forEach(([id, qty]) => {
+                                    const mItem = menuItems.find(i => i.id === parseInt(id));
+                                    const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
+                                    totalFoodRevenue += (Number(qty) * price);
+                                });
+                            }
                             
-                            <div className="flex gap-2 mb-6 overflow-x-auto pb-2 scrollbar-hide">
-                                {['Today', 'Weekly', 'Monthly', 'Yearly', 'All'].map(filter => (
-                                    <button 
-                                        key={filter} 
-                                        onClick={() => handleFilterChange(filter)} 
-                                        className={`px-6 py-2 rounded-lg text-sm font-bold transition ${analyticsFilter === filter ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700 hover:text-white border border-white/10'}`}
-                                    >
-                                        {filter}
-                                    </button>
-                                ))}
-                            </div>
+                            // B. Custom & Inventory Items
+                            if (order.customItems) {
+                                order.customItems.forEach(cItem => {
+                                    if (cItem.isInv) {
+                                        totalInvRevenue += (Number(cItem.qty) * Number(cItem.price));
+                                    } else if (cItem.isCustom) {
+                                        totalCustomRevenue += (Number(cItem.qty) * Number(cItem.price));
+                                    }
+                                });
+                            }
+                        });
 
-                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg mb-6 flex items-center justify-between">
-                                <div>
-                                    <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Revenue ({analyticsFilter})</p>
-                                    <p className="text-4xl font-black text-white mt-1">₹{filteredTxns.reduce((acc, curr) => acc + (Number(curr.total) || 0), 0)}</p>
-                                </div>
-                                <div className="w-12 h-12 bg-cyan-500/20 rounded-full flex items-center justify-center text-cyan-400">
-                                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                                </div>
-                            </div>
+                        const totalRevenue = totalCash + totalOnline;
 
-                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 h-[400px] w-full shadow-lg mb-6">
-                                {getAnalyticsData().length > 0 ? (
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <BarChart data={getAnalyticsData()}>
-                                            <CartesianGrid strokeDasharray="3 3" stroke="#444" vertical={false} />
-                                            <XAxis dataKey="name" stroke="#888" tickLine={false} axisLine={false} />
-                                            <YAxis stroke="#888" tickLine={false} axisLine={false} tickFormatter={(value) => `₹${value}`} />
-                                            <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px', color: '#fff' }} itemStyle={{ color: '#06b6d4', fontWeight: 'bold' }} cursor={{fill: '#334155'}} />
-                                            <Bar dataKey="sales" fill="#06b6d4" radius={[4, 4, 0, 0]} maxBarSize={60} />
-                                        </BarChart>
-                                    </ResponsiveContainer>
-                                ) : (
-                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 font-bold space-y-3">
-                                        <svg className="w-12 h-12 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
-                                        <p>No sales data found for {analyticsFilter.toLowerCase()}.</p>
+                        return ( 
+                            <div className="max-w-6xl mx-auto pb-10">
+                                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                                    <h2 className="text-2xl font-bold">Sales & Transactions</h2>
+                                    <div className="flex gap-2 w-full md:w-auto">
+                                        <button onClick={() => setDrawerModal(true)} className="flex-1 md:flex-none bg-yellow-500 hover:bg-yellow-400 text-black px-4 py-2 rounded-lg text-sm font-bold shadow-lg transition whitespace-nowrap">💵 Daily Cash In Box</button>
+                                        <button onClick={handleExportAnalytics} className="flex-1 md:flex-none bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex gap-2 mb-6 overflow-x-auto pb-2 scrollbar-hide items-center w-full max-w-[100vw]">
+                                    {['Today', 'Weekly', 'Monthly', 'Yearly', 'All', 'Custom'].map(filter => (
+                                        <button 
+                                            key={filter} 
+                                            onClick={() => handleFilterChange(filter)} 
+                                            className={`px-6 py-2 rounded-lg text-sm font-bold transition ${analyticsFilter === filter ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700 hover:text-white border border-white/10'}`}
+                                        >
+                                            {filter}
+                                        </button>
+                                    ))}
+                                    {analyticsFilter === 'Custom' && (
+                                        <input 
+                                            type="date" 
+                                            value={analyticsCustomDate}
+                                            onChange={(e) => setAnalyticsCustomDate(e.target.value)}
+                                            className="bg-slate-800 border border-white/10 rounded-lg p-2 text-sm text-white focus:border-cyan-500 outline-none transition ml-2"
+                                        />
+                                    )}
+                                </div>
+
+                                {/* PRIMARY 3 STAT CARDS (Total, Cash, Online) */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-cyan-500">
+                                        <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Total Revenue ({analyticsFilter})</p>
+                                        <p className="text-3xl font-black text-white mt-1">₹{totalRevenue}</p>
+                                    </div>
+                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-green-500">
+                                        <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Cash Received</p>
+                                        <p className="text-3xl font-black text-green-400 mt-1">₹{totalCash}</p>
+                                    </div>
+                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
+                                        <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Online Received</p>
+                                        <p className="text-3xl font-black text-blue-400 mt-1">₹{totalOnline}</p>
+                                    </div>
+                                </div>
+
+                                
+                               {/* NEW: REVENUE SOURCE SPLIT CARDS */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                                    <div onClick={() => setSelectedRevenueCategory('Food')} className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-orange-500 cursor-pointer hover:-translate-y-1 transition hover:border-orange-500/50">
+                                        <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Food Revenue</p>
+                                        <p className="text-2xl font-black text-orange-400 mt-1">₹{totalFoodRevenue}</p>
+                                    </div>
+                                    <div onClick={() => setSelectedRevenueCategory('Inventory')} className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-purple-500 cursor-pointer hover:-translate-y-1 transition hover:border-purple-500/50">
+                                        <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Inventory Revenue</p>
+                                        <p className="text-2xl font-black text-purple-400 mt-1">₹{totalInvRevenue}</p>
+                                    </div>
+                                    <div onClick={() => setSelectedRevenueCategory('Custom')} className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-pink-500 cursor-pointer hover:-translate-y-1 transition hover:border-pink-500/50">
+                                        <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Custom Items Revenue</p>
+                                        <p className="text-2xl font-black text-pink-400 mt-1">₹{totalCustomRevenue}</p>
+                                    </div>
+                                </div>
+
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 h-[400px] w-full shadow-lg mb-6">
+                                    {getAnalyticsData().length > 0 ? (
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <BarChart data={getAnalyticsData()}>
+                                                <CartesianGrid strokeDasharray="3 3" stroke="#444" vertical={false} />
+                                                <XAxis dataKey="name" stroke="#888" tickLine={false} axisLine={false} />
+                                                <YAxis stroke="#888" tickLine={false} axisLine={false} tickFormatter={(value) => `₹${value}`} />
+                                                <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '8px', color: '#fff' }} itemStyle={{ color: '#06b6d4', fontWeight: 'bold' }} cursor={{fill: '#334155'}} />
+                                                <Bar dataKey="sales" fill="#06b6d4" radius={[4, 4, 0, 0]} maxBarSize={60} />
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    ) : (
+                                        <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 font-bold space-y-3">
+                                            <svg className="w-12 h-12 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>
+                                            <p>No sales data found for {analyticsFilter.toLowerCase()}.</p>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <h3 className="text-xl font-bold mb-4">Transaction Ledger ({analyticsFilter})</h3>
+                                <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full max-w-[100vw] overflow-x-auto shadow-lg">
+                                    <table className="w-full text-left text-sm text-gray-400 min-w-[800px]">
+                                        <thead className="bg-black/30 text-white uppercase text-xs">
+                                            <tr>
+                                                <th className="p-4">Order ID</th>
+                                                <th className="p-4">Date</th>
+                                                <th className="p-4">Customer</th>
+                                                <th className="p-4">Amount</th>
+                                                <th className="p-4">Method</th>
+                                                <th className="p-4">Txn ID</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {currentTxns.map(order => ( 
+                                                <tr key={order.id} className="border-b border-white/5 hover:bg-white/5">
+                                                    <td className="p-4 font-mono text-white">#{order.displayId || order.id}</td>
+                                                    <td className="p-4">{order.date} {order.time}</td>
+                                                    <td className="p-4">{order.customer?.name || 'Walk-in'}</td>
+                                                    <td className="p-4 font-bold text-green-400">₹{order.total}</td>
+                                                    <td className="p-4">
+                                                        {order.paymentMethod === 'Split' ? (
+                                                            <div className="flex flex-col items-start">
+                                                                <span className="bg-purple-500/20 text-purple-400 px-2 py-1 rounded text-xs font-bold mb-1">Split</span>
+                                                                <span className="text-[10px] text-gray-500">Cash: ₹{order.splitAmounts?.cash} | Online: ₹{order.splitAmounts?.online}</span>
+                                                            </div>
+                                                        ) : (
+                                                            <span className={`px-2 py-1 rounded text-xs font-bold ${String(order.paymentMethod || '').toLowerCase().includes('online') || String(order.paymentMethod || '').toLowerCase().includes('upi') || String(order.paymentMethod || '').toLowerCase().includes('card') ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>
+                                                                {order.paymentMethod || 'Cash'}
+                                                            </span>
+                                                        )}
+                                                    </td>
+                                                    <td className="p-4 font-mono text-xs text-gray-500">{order.paymentId || '-'}</td>
+                                                </tr> 
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                    {currentTxns.length === 0 && <div className="text-center py-8 text-gray-500 text-sm">No transactions found for this period.</div>}
+                                </div>
+                                
+                                {/* Pagination Controls */}
+                                {totalTxnPages > 1 && (
+                                    <div className="flex justify-between items-center mt-4">
+                                        <button onClick={() => setTransactionPage(prev => Math.max(1, prev - 1))} disabled={transactionPage === 1} className="px-4 py-2 bg-slate-800 text-white rounded-lg disabled:opacity-50 hover:bg-slate-700 transition">Previous</button>
+                                        <span className="text-sm text-gray-400">Page {transactionPage} of {totalTxnPages}</span>
+                                        <button onClick={() => setTransactionPage(prev => Math.min(totalTxnPages, prev + 1))} disabled={transactionPage === totalTxnPages} className="px-4 py-2 bg-slate-800 text-white rounded-lg disabled:opacity-50 hover:bg-slate-700 transition">Next</button>
                                     </div>
                                 )}
-                            </div>
-
-                            <h3 className="text-xl font-bold mb-4">Transaction Ledger ({analyticsFilter})</h3>
-                            <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 overflow-x-auto shadow-lg">
-                                <table className="w-full text-left text-sm text-gray-400 min-w-[800px]">
-                                    <thead className="bg-black/30 text-white uppercase text-xs">
-                                        <tr>
-                                            <th className="p-4">Order ID</th>
-                                            <th className="p-4">Date</th>
-                                            <th className="p-4">Customer</th>
-                                            <th className="p-4">Amount</th>
-                                            <th className="p-4">Method</th>
-                                            <th className="p-4">Txn ID</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {currentTxns.map(order => ( 
-                                            <tr key={order.id} className="border-b border-white/5 hover:bg-white/5">
-                                                <td className="p-4 font-mono text-white">#{order.displayId || order.id}</td>
-                                                <td className="p-4">{order.date} {order.time}</td>
-                                                <td className="p-4">{order.customer?.name || 'Walk-in'}</td>
-                                                <td className="p-4 font-bold text-green-400">₹{order.total}</td>
-                                                <td className="p-4">
-                                                    <span className={`px-2 py-1 rounded text-xs font-bold ${order.paymentMethod?.includes('Online') ? 'bg-blue-500/20 text-blue-400' : order.paymentMethod === 'Split' ? 'bg-purple-500/20 text-purple-400' : 'bg-green-500/20 text-green-400'}`}>
-                                                        {order.paymentMethod || 'Cash'}
-                                                    </span>
-                                                </td>
-                                                <td className="p-4 font-mono text-xs text-gray-500">{order.paymentId || '-'}</td>
-                                            </tr> 
-                                        ))}
-                                    </tbody>
-                                </table>
-                                {currentTxns.length === 0 && <div className="text-center py-8 text-gray-500 text-sm">No transactions found for this period.</div>}
-                            </div>
-                            
-                            {/* Pagination Controls */}
-                            {totalTxnPages > 1 && (
-                                <div className="flex justify-between items-center mt-4">
-                                    <button onClick={() => setTransactionPage(prev => Math.max(1, prev - 1))} disabled={transactionPage === 1} className="px-4 py-2 bg-slate-800 text-white rounded-lg disabled:opacity-50 hover:bg-slate-700 transition">Previous</button>
-                                    <span className="text-sm text-gray-400">Page {transactionPage} of {totalTxnPages}</span>
-                                    <button onClick={() => setTransactionPage(prev => Math.min(totalTxnPages, prev + 1))} disabled={transactionPage === totalTxnPages} className="px-4 py-2 bg-slate-800 text-white rounded-lg disabled:opacity-50 hover:bg-slate-700 transition">Next</button>
-                                </div>
-                            )}
-                        </div> 
-                    )}
+                            </div> 
+                        );
+                    })()}
                     
-                    {activeTab === 'users' && ( <div className="max-w-6xl mx-auto"><h2 className="text-2xl font-bold mb-6">Registered Users</h2><div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 overflow-x-auto"><table className="w-full text-sm text-left text-gray-400 min-w-[600px]"><thead className="text-xs text-gray-200 uppercase bg-black/30"><tr><th className="p-4">Name</th><th className="p-4">Phone</th><th className="p-4">Joined</th><th className="p-4">Orders</th></tr></thead><tbody>{users.map((u, idx) => <tr key={idx} className="border-b border-white/5 hover:bg-white/5"><td className="p-4 font-bold text-white capitalize">{u.name}</td><td className="p-4 font-mono text-cyan-400">{u.phone}</td><td className="p-4">{u.joined_at || 'N/A'}</td><td className="p-4"><span className="bg-white/10 px-2 py-1 rounded text-xs font-bold text-white">{u.total_orders || 0}</span></td></tr>)}</tbody></table></div></div> )}
+                    {/* TAB: REGISTERED USERS */}
+                    {activeTab === 'users' && ( <div className="max-w-6xl mx-auto"><h2 className="text-2xl font-bold mb-6">Registered Users</h2><div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full overflow-x-auto"><table className="w-full text-sm text-left text-gray-400 min-w-[600px]"><thead className="text-xs text-gray-200 uppercase bg-black/30"><tr><th className="p-4">Name</th><th className="p-4">Phone</th><th className="p-4">Joined</th><th className="p-4">Orders</th></tr></thead><tbody>{users.map((u, idx) => <tr key={idx} className="border-b border-white/5 hover:bg-white/5"><td className="p-4 font-bold text-white capitalize">{u.name}</td><td className="p-4 font-mono text-cyan-400">{u.phone}</td><td className="p-4">{u.joined_at || 'N/A'}</td><td className="p-4"><span className="bg-white/10 px-2 py-1 rounded text-xs font-bold text-white">{u.total_orders || 0}</span></td></tr>)}</tbody></table></div></div> )}
+                    
+                    {/* TAB: MENU MANAGER */}
                     {activeTab === 'menu' && ( 
                         <div className="max-w-4xl mx-auto">
                             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
@@ -1327,7 +3850,7 @@ function AdminDashboard({ onLogout }) {
                                                     <div key={idx} className={`flex items-center gap-3 bg-black/20 p-3 rounded-xl border ${item.in_stock === false ? 'border-red-500/30 opacity-75' : 'border-white/5 hover:border-white/10 transition'}`}>
                                                         <img src={item.img} className={`w-12 h-12 rounded-lg object-cover ${item.in_stock === false ? 'grayscale' : ''}`} />
                                                         <div className="flex-1 min-w-0"><h4 className="font-bold text-sm truncate">{item.name} {item.is_special && '⭐'}</h4><p className="text-xs text-gray-500">{item.price}</p></div>
-                                                        <div className="flex gap-2"><button onClick={() => toggleSpecial(item)} className={`p-2 rounded text-xs ${item.is_special ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-400'}`}>★</button><button onClick={() => setItemModal({open:true, mode:'edit', data:item})} className="text-xs bg-blue-500/10 text-blue-400 p-2 rounded hover:bg-blue-500 hover:text-white">✏️</button><button onClick={() => toggleStock(item)} className={`text-[10px] font-bold px-2 py-1 rounded transition ${item.in_stock !== false ? 'bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-black' : 'bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white'}`}>{item.in_stock !== false ? 'In' : 'Out'}</button><button onClick={() => deleteItem(item.id)} className="text-xs bg-red-500/10 text-red-400 p-2 rounded hover:bg-red-50 hover:text-white">🗑</button></div>
+                                                        <div className="flex gap-2"><button onClick={() => toggleSpecial(item)} className={`p-2 rounded text-xs ${item.is_special ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-400'}`}>★</button><button onClick={() => setItemModal({open:true, mode:'edit', data:item})} className="text-xs bg-blue-500/10 text-blue-400 p-2 rounded hover:bg-blue-50 hover:text-white">✏️</button><button onClick={() => toggleStock(item)} className={`text-[10px] font-bold px-2 py-1 rounded transition ${item.in_stock !== false ? 'bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-black' : 'bg-red-500/20 text-red-400 hover:bg-red-50 hover:text-white'}`}>{item.in_stock !== false ? 'In' : 'Out'}</button><button onClick={() => deleteItem(item.id)} className="text-xs bg-red-500/10 text-red-400 p-2 rounded hover:bg-red-50 hover:text-white">🗑</button></div>
                                                     </div> 
                                                 ))}
                                             </div>
@@ -1366,45 +3889,144 @@ function AdminDashboard({ onLogout }) {
                         </div> 
                     )}
 
-                    {/* TAB: HISTORY */}
-                    {activeTab === 'history' && ( 
-                        <div className="max-w-6xl mx-auto">
-                            <h2 className="text-2xl font-bold mb-6">Order History</h2>
-                            <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 overflow-x-auto shadow-lg">
-                                <table className="w-full text-sm text-left text-gray-400 min-w-[850px]">
-                                    <thead className="text-xs text-gray-200 uppercase bg-black/30">
-                                        <tr>
-                                            <th className="p-4">ID</th>
-                                            <th className="p-4">Time</th>
-                                            <th className="p-4">Location</th>
-                                            <th className="p-4">Amount</th>
-                                            <th className="p-4">Method</th>
-                                            <th className="p-4">Status</th>
-                                            <th className="p-4 text-center">Action</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {getSortedHistory().map(order => ( 
-                                            <tr key={order.id} className="border-b border-white/5 hover:bg-white/5 transition">
-                                                <td className="p-4 font-bold text-white">#{order.displayId || order.id}</td>
-                                                <td className="p-4">{order.date} {order.time}</td>
-                                                <td className="p-4">{order.tableNo} • {order.customer?.name}</td>
-                                                <td className="p-4 text-green-400 font-bold">₹{order.total}</td>
-                                                <td className="p-4">
-                                                    <span className={`px-2 py-1 rounded text-xs font-bold ${order.paymentMethod?.includes('Online') ? 'bg-blue-500/20 text-blue-400' : order.paymentMethod === 'Split' ? 'bg-purple-500/20 text-purple-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
-                                                        {order.paymentMethod || 'Cash'}
-                                                    </span>
-                                                </td>
-                                                <td className="p-4">
-                                                    <span className={`px-2 py-1 rounded text-xs font-bold ${order.status === 'Picked Up' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                                                        {order.status}
-                                                    </span>
-                                                </td>
-                                                <td className="p-4 text-center flex justify-center gap-2">
-                                                    {/* WHATSAPP PDF BUTTON */}
-                                                    <button onClick={(e) => sendWhatsAppPDF(order, e)} className="bg-[#25D366]/20 hover:bg-[#25D366] text-[#25D366] hover:text-white p-2 rounded-lg transition" title="Share Bill as PDF">
-                                                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 00-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
-                                                    </button>
+                  {/* TAB: HISTORY */}
+                    {activeTab === 'history' && (() => {
+                        // 1. Calculate totals for the searched item
+                        let searchedItemQty = 0;
+                        let searchedItemRevenue = 0;
+                        
+                        if (historyItemSearch.trim() !== '') {
+                            const query = historyItemSearch.toLowerCase();
+                            
+                            getSortedHistory().forEach(order => {
+                                // Only calculate revenue and quantity from completed orders
+                                if (order.status !== 'Picked Up') return; 
+                                
+                                const itemsObj = order.items || {};
+                                const customArr = order.customItems || [];
+                                
+                                // Check regular menu items
+                                Object.entries(itemsObj).forEach(([id, qty]) => {
+                                    const mItem = menuItems.find(i => i.id === parseInt(id));
+                                    if (mItem && mItem.name.toLowerCase().includes(query)) {
+                                        searchedItemQty += Number(qty);
+                                        const price = parseInt(String(mItem.price).replace(/[^0-9]/g, '')) || 0;
+                                        searchedItemRevenue += (Number(qty) * price);
+                                    }
+                                });
+                                
+                                // Check custom/inventory items
+                                customArr.forEach(cItem => {
+                                    if (cItem.name.toLowerCase().includes(query)) {
+                                        searchedItemQty += Number(cItem.qty);
+                                        searchedItemRevenue += (Number(cItem.qty) * Number(cItem.price));
+                                    }
+                                });
+                            });
+                        }
+
+                        return (
+                            <div className="max-w-6xl mx-auto">
+                                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                                    <h2 className="text-2xl font-bold">Order History</h2>
+                                    <div className="flex gap-2 w-full md:w-auto">
+                                        <button onClick={() => setPendingModal(true)} className="bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 text-red-400 px-4 py-2 rounded-xl text-sm font-bold transition shadow-lg flex items-center gap-2">
+                                    ⚠️ Pending Payments
+                                    <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">
+                                        {orders.filter(o => o.paymentStatus === 'Pending').length}
+                                    </span>
+                                </button>
+                                        <div className="relative flex-1 md:w-72">
+                                            
+                                            <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">🔍</span>
+                                            <input 
+                                                type="text" 
+                                                placeholder="Search by item name (e.g. Maggie)" 
+                                                value={historyItemSearch}
+                                                onChange={(e) => setHistoryItemSearch(e.target.value)}
+                                                className="w-full bg-slate-800 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition"
+                                            />
+                                        </div>
+                                        <button onClick={handleExportHistory} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-xl text-sm font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
+                                    </div>
+                                </div>
+
+                                {/* NEW: ITEM SEARCH SUMMARY BANNER */}
+                                {historyItemSearch.trim() !== '' && (
+                                    <div className="bg-cyan-500/10 border border-cyan-500/30 p-5 rounded-xl mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-lg animate-fade-in">
+                                        <div>
+                                            <h3 className="text-cyan-400 font-bold text-lg">Search Results for "{historyItemSearch}"</h3>
+                                            <p className="text-xs text-gray-400 mt-1">Total units sold and revenue from <strong className="text-white">completed orders</strong> matching this item.</p>
+                                        </div>
+                                        <div className="flex gap-8 bg-black/20 p-3 rounded-lg border border-white/5">
+                                            <div>
+                                                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1">Total Qty Sold</p>
+                                                <p className="text-2xl font-black text-white">{searchedItemQty}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1">Total Revenue</p>
+                                                <p className="text-2xl font-black text-green-400">₹{searchedItemRevenue}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full max-w-[100vw] overflow-x-auto shadow-lg">
+                                    <table className="w-full text-sm text-left text-gray-400 min-w-[850px]">
+                                        <thead className="text-xs text-gray-200 uppercase bg-black/30">
+                                            <tr>
+                                                <th className="p-4">ID</th>
+                                                <th className="p-4">Time</th>
+                                                <th className="p-4">Location</th>
+                                                <th className="p-4">Amount</th>
+                                                <th className="p-4">Method</th>
+                                                <th className="p-4">Status</th>
+                                                <th className="p-4 text-center">Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {getSortedHistory().map(order => ( 
+                                                <tr key={order.id} className="border-b border-white/5 hover:bg-white/5 transition">
+                                                    <td className="p-4 font-bold text-white">#{order.displayId || order.id}</td>
+                                                    <td className="p-4">{order.date} {order.time}</td>
+                                                    <td className="p-4">{order.tableNo} • {order.customer?.name}</td>
+                                                    <td className="p-4 text-green-400 font-bold">₹{order.total}</td>
+                                                    <td className="p-4">
+                                                        {order.paymentMethod === 'Split' ? (
+                                                            <div className="flex flex-col items-start">
+                                                                <span className="bg-purple-500/20 text-purple-400 px-2 py-1 rounded text-xs font-bold mb-1">Split</span>
+                                                                <span className="text-[10px] text-gray-500">Cash: ₹{order.splitAmounts?.cash} | Online: ₹{order.splitAmounts?.online}</span>
+                                                            </div>
+                                                        ) : (
+                                                            <span className={`px-2 py-1 rounded text-xs font-bold ${String(order.paymentMethod || '').toLowerCase().includes('online') || String(order.paymentMethod || '').toLowerCase().includes('upi') || String(order.paymentMethod || '').toLowerCase().includes('card') ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>
+                                                                {order.paymentMethod || 'Cash'}
+                                                            </span>
+                                                        )}
+                                                    </td>
+                                                    <td className="p-4">
+                                                        <span className={`px-2 py-1 rounded text-xs font-bold ${order.status === 'Picked Up' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                                                            {order.status}
+                                                        </span>
+                                                    </td>
+                                                    <td className="p-4 text-center flex justify-center gap-2">
+                                                        
+                                                        {/* NEW EYE ICON - VIEW DETAILS */}
+                                                        <button onClick={() => setViewOrderDetails(order)} className="bg-blue-500/20 hover:bg-blue-500 text-blue-400 hover:text-white p-2 rounded-lg transition" title="View Details">
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                                                        </button>
+
+                                                        {/* NEW EDIT HISTORY BUTTON */}
+                                                        <button onClick={() => setEditHistoryModal({ open: true, order: order, tempMethod: order.paymentMethod || 'Cash' })} className="bg-yellow-500/20 hover:bg-yellow-500 text-yellow-400 hover:text-black p-2 rounded-lg transition" title="Edit Order Details">
+                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                                                        </button>
+
+                                                        {/* WHATSAPP PDF BUTTON */}
+                                                        {order.paymentStatus === 'Paid' && (
+                                                            <button onClick={(e) => sendWhatsAppPDF(order, e)} className="bg-[#25D366]/20 hover:bg-[#25D366] text-[#25D366] hover:text-white p-2 rounded-lg transition" title="Share Bill as PDF">
+                                                                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51a12.8 12.8 0 00-.57-.01c-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+                                                        </button>
+                                                    )}
+                                                    
                                                     <button onClick={() => printBill(order)} className="bg-slate-700 hover:bg-white hover:text-black p-2 rounded-lg transition" title="Print Bill">
                                                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
                                                     </button>
@@ -1415,12 +4037,31 @@ function AdminDashboard({ onLogout }) {
                                 </table>
                             </div>
                         </div> 
-                    )}
+                    );
+                    })()}
                     
                     {/* --- SETTINGS TAB --- */}
                     {activeTab === 'settings' && (
                         <div className="max-w-4xl mx-auto space-y-8 pb-10">
                             <h2 className="text-2xl font-bold mb-6">App Settings</h2>
+
+                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
+                                <h3 className="text-xl font-bold mb-2 text-white">Push Notifications</h3>
+                                <p className="text-sm text-gray-400 mb-4">Enable lock-screen notifications for new orders on this device.</p>
+                                <button 
+                                    onClick={() => {
+                                        window.OneSignalDeferred = window.OneSignalDeferred || [];
+                                        window.OneSignalDeferred.push(function(OneSignal) {
+                                            OneSignal.Notifications.requestPermission().then((accepted) => {
+                                                if(accepted) alert("Notifications Enabled!");
+                                            });
+                                        });
+                                    }} 
+                                    className="bg-blue-500 hover:bg-blue-400 text-white font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-blue-500/20 flex items-center gap-2"
+                                >
+                                    🔔 Enable Notifications
+                                </button>
+                            </div>
 
                             <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg">
                                 <h3 className="text-xl font-bold mb-2">App Name</h3>
