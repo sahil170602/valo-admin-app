@@ -85,7 +85,7 @@ export default function AdminPanel() {
    useEffect(() => {
         const setupPush = async () => {
             
-           // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
+  // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
 if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
     try {
         // v3 Syntax (What your project is using)
@@ -105,7 +105,7 @@ if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
     }
 }
 // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
-            // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
+
             else {
                 if (window.OneSignalInitialized) return; 
                 window.OneSignalInitialized = true;
@@ -3091,13 +3091,24 @@ const handleSaveMissingItem = async (e) => {
                     
                     <div className="flex items-center">
                         <button 
-  onClick={() => {
+onClick={() => {
     // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
     if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
         try {
-            OneSignal.Notifications.requestPermission(true).then((accepted) => {
-                alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-            });
+            if (window.plugins && window.plugins.OneSignal) {
+                // Safe check for v3/v5 plugins
+                if (window.plugins.OneSignal.Notifications) {
+                    window.plugins.OneSignal.Notifications.requestPermission(true).then((accepted) => {
+                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+                    });
+                } else if (window.plugins.OneSignal.promptForPushNotificationsWithUserResponse) {
+                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
+                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+                    });
+                }
+            } else {
+                alert("OneSignal native plugin is loading. Please try again in a moment.");
+            }
         } catch (err) {
             console.error("OneSignal Prompt Error:", err);
         }
