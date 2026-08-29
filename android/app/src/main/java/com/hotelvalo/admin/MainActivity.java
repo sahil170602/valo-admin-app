@@ -1,4 +1,4 @@
-package com.valo.admin;
+package com.hotelvalo.admin;
 
 import com.getcapacitor.BridgeActivity;
 
