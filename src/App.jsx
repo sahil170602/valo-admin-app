@@ -74,24 +74,26 @@ const exportCSV = (data, filename) => {
     document.body.removeChild(a);
 };
 
+
+
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
-    const [showGate, setShowGate] = useState(true); // Controls showing the Login screen
+    const [showGate, setShowGate] = useState(true);
 
     useEffect(() => {
         const setupPush = async () => {
             // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
-            // This detects if the app is running as an installed APK
             if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
                 if (window.plugins && window.plugins.OneSignal) {
                     window.plugins.OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+                    
+                    // Automatically prompt the user for permission on mobile
                     window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
-                        console.log("Mobile notifications enabled: " + accepted);
+                        console.log("User accepted notifications: " + accepted);
                     });
                 }
             } 
             // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
-            // This runs if accessed via Chrome/Safari or inside your Windows Electron wrapper
             else {
                 if (window.OneSignalInitialized) return; 
                 window.OneSignalInitialized = true;
@@ -102,7 +104,7 @@ export default function AdminPanel() {
                         await OneSignal.init({
                             appId: "3a997ca5-9d8f-4e81-8943-907b81b9a577",
                             safari_web_id: "web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65",
-                            notifyButton: { enable: false },
+                            notifyButton: { enable: true }, // Enable web bell if desired
                             allowLocalhostAsSecureOrigin: true,
                         });
                     } catch (err) {
@@ -113,6 +115,8 @@ export default function AdminPanel() {
         };
         setupPush();
     }, []);
+
+
 
     useEffect(() => {
         const timer = setTimeout(() => { setIsLoading(false); }, 3000);
@@ -3032,7 +3036,6 @@ const handleSaveMissingItem = async (e) => {
                     <SidebarBtn icon="📊" label="History" active={activeTab === 'history'} onClick={() => handleTabClick('history')} />
                     
                     {/* --- LOCKED TABS (Requires PIN if not unlocked) --- */}
-                    <SidebarBtn icon="⏳" label={`Pending Payments ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'pending_payments'} onClick={() => handleTabClick('pending_payments')} badge={pendingPaymentOrdersCount} />
                     <SidebarBtn icon="💸" label={`Expense Mgmt ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'expenses'} onClick={() => handleTabClick('expenses')} />
                     <SidebarBtn icon="🛒" label={`Stock Purchases ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'purchases'} onClick={() => handleTabClick('purchases')} />    
                     <SidebarBtn icon="🧑‍🍳" label={`Operations & Staff ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'staff'} onClick={() => handleTabClick('staff')} />
@@ -3057,17 +3060,32 @@ const handleSaveMissingItem = async (e) => {
                     
                     <div className="flex items-center">
                         <button 
-                            onClick={() => {
-                                window.OneSignalDeferred = window.OneSignalDeferred || [];
-                                window.OneSignalDeferred.push(function(OneSignal) {
-                                    OneSignal.Notifications.requestPermission();
-                                });
-                            }} 
-                            className="p-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500 hover:text-black transition"
-                            title="Enable Notifications"
-                        >
-                            🔔
-                        </button>
+    onClick={() => {
+        // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
+        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+            if (window.plugins && window.plugins.OneSignal) {
+                window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
+                    alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+                });
+            }
+        } 
+        // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
+        else {
+            window.OneSignalDeferred = window.OneSignalDeferred || [];
+            window.OneSignalDeferred.push(async function(OneSignal) {
+                try {
+                    await OneSignal.Slidedown.promptPush();
+                } catch (err) {
+                    console.log("Push prompt error:", err);
+                }
+            });
+        }
+    }} 
+    className="p-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500 hover:text-black transition"
+    title="Enable Notifications"
+>
+    🔔
+</button>
                     </div>
                 </header>
                 
@@ -4198,7 +4216,7 @@ const handleSaveMissingItem = async (e) => {
                                     <h2 className="text-2xl font-bold">Order History</h2>
                                     <div className="flex gap-2 w-full md:w-auto">
                                         <button onClick={() => setPendingModal(true)} className="bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 text-red-400 px-4 py-2 rounded-xl text-sm font-bold transition shadow-lg flex items-center gap-2">
-                                    ⚠️ Pending Payments
+                                    ⚠️ Pending
                                     <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">
                                         {orders.filter(o => o.paymentStatus === 'Pending').length}
                                     </span>
@@ -4208,7 +4226,7 @@ const handleSaveMissingItem = async (e) => {
                                             <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">🔍</span>
                                             <input 
                                                 type="text" 
-                                                placeholder="Search by item name (e.g. Maggie)" 
+                                                placeholder="Search" 
                                                 value={historyItemSearch}
                                                 onChange={(e) => setHistoryItemSearch(e.target.value)}
                                                 className="w-full bg-slate-800 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition"
@@ -4316,18 +4334,31 @@ const handleSaveMissingItem = async (e) => {
                                 <h3 className="text-xl font-bold mb-2 text-white">Push Notifications</h3>
                                 <p className="text-sm text-gray-400 mb-4">Enable lock-screen notifications for new orders on this device.</p>
                                 <button 
-                                    onClick={() => {
-                                        window.OneSignalDeferred = window.OneSignalDeferred || [];
-                                        window.OneSignalDeferred.push(function(OneSignal) {
-                                            OneSignal.Notifications.requestPermission().then((accepted) => {
-                                                if(accepted) alert("Notifications Enabled!");
-                                            });
-                                        });
-                                    }} 
-                                    className="bg-blue-500 hover:bg-blue-400 text-white font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-blue-500/20 flex items-center gap-2"
-                                >
-                                    🔔 Enable Notifications
-                                </button>
+    onClick={() => {
+        // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
+        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+            if (window.plugins && window.plugins.OneSignal) {
+                window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
+                    alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+                });
+            }
+        } 
+        // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
+        else {
+            window.OneSignalDeferred = window.OneSignalDeferred || [];
+            window.OneSignalDeferred.push(async function(OneSignal) {
+                try {
+                    await OneSignal.Slidedown.promptPush();
+                } catch (err) {
+                    console.log("Push prompt error:", err);
+                }
+            });
+        }
+    }} 
+    className="bg-blue-500 hover:bg-blue-400 text-white font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-blue-500/20 flex items-center gap-2"
+>
+    🔔 Enable Notifications
+</button>
                             </div>
 
                             <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg">
