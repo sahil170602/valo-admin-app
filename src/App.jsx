@@ -85,20 +85,20 @@ export default function AdminPanel() {
    useEffect(() => {
         const setupPush = async () => {
             
-  // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
+// --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
 if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
     try {
-        // v3 Syntax (What your project is using)
-        if (OneSignal.setAppId) {
+        // v5 Syntax (Prioritized for version 5.x)
+        if (OneSignal.initialize) {
+            OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+            OneSignal.Notifications.requestPermission(true);
+        } 
+        // v3 Syntax (Fallback)
+        else if (OneSignal.setAppId) {
             OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
             OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
                 console.log("User accepted notifications: ", accepted);
             });
-        } 
-        // v5 Syntax (Fallback)
-        else if (OneSignal.initialize) {
-            OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-            OneSignal.Notifications.requestPermission(true);
         }
     } catch (err) {
         console.error("OneSignal Init Error:", err);
@@ -4379,36 +4379,31 @@ onClick={() => {
                                 <p className="text-sm text-gray-400 mb-4">Enable lock-screen notifications for new orders on this device.</p>
                                 <button 
     
-    onClick={() => {
-        // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
-        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+ onClick={() => {
+    // --- 1. NATIVE ANDROID / IOS ONLY ---
+    if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+        try {
             if (window.plugins && window.plugins.OneSignal) {
-                // OneSignal v5+ Syntax
                 if (window.plugins.OneSignal.Notifications) {
                     window.plugins.OneSignal.Notifications.requestPermission(true).then((accepted) => {
                         alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
                     });
-                } 
-                // Fallback
-                else if (window.plugins.OneSignal.promptForPushNotificationsWithUserResponse) {
-                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
+                } else if (window.plugins.OneSignal.promptForPushNotificationsWithUserResponse) {
+                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
                         alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
                     });
                 }
             }
-        } 
-        // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
-        else {
-            window.OneSignalDeferred = window.OneSignalDeferred || [];
-            window.OneSignalDeferred.push(async function(OneSignal) {
-                try {
-                    await OneSignal.Slidedown.promptPush();
-                } catch (err) {
-                    console.log("Push prompt error:", err);
-                }
-            });
+        } catch (err) {
+            console.error("OneSignal Prompt Error:", err);
         }
-    }} 
+    } 
+    // --- 2. SAFE WEB BROWSER BYPASS ---
+    else {
+        console.log("Web notification prompt clicked (Simulated on browser).");
+        alert("Push notifications are fully active when running inside the Android mobile app.");
+    }
+}}
     className="bg-blue-500 hover:bg-blue-400 text-white font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-blue-500/20 flex items-center gap-2"
 >
     🔔 Enable Notifications
