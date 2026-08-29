@@ -84,23 +84,17 @@ export default function AdminPanel() {
 
    useEffect(() => {
         const setupPush = async () => {
+            
             // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
             if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-                if (window.plugins && window.plugins.OneSignal) {
-                    // Try OneSignal v5+ syntax first
-                    if (window.plugins.OneSignal.initialize) {
-                        window.plugins.OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-                        window.plugins.OneSignal.Notifications.requestPermission(true);
-                    } 
-                    // Fallback for older versions
-                    else if (window.plugins.OneSignal.setAppId) {
-                        window.plugins.OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-                        window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
-                            console.log("User accepted notifications: " + accepted);
-                        });
-                    }
+                try {
+                    // Call the imported OneSignal directly, NOT window.plugins
+                    OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+                    OneSignal.Notifications.requestPermission(true);
+                } catch (err) {
+                    console.error("OneSignal Init Error:", err);
                 }
-            } 
+            }
             // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
             else {
                 if (window.OneSignalInitialized) return; 
@@ -3087,22 +3081,15 @@ const handleSaveMissingItem = async (e) => {
                     
                     <div className="flex items-center">
                         <button 
-   onClick={() => {
+  onClick={() => {
     // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
     if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-        if (window.plugins && window.plugins.OneSignal) {
-            // OneSignal v5+ Syntax
-            if (window.plugins.OneSignal.Notifications) {
-                window.plugins.OneSignal.Notifications.requestPermission(true).then((accepted) => {
-                    alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                });
-            } 
-            // Older version fallback
-            else if (window.plugins.OneSignal.promptForPushNotificationsWithUserResponse) {
-                window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
-                    alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                });
-            }
+        try {
+            OneSignal.Notifications.requestPermission(true).then((accepted) => {
+                alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+            });
+        } catch (err) {
+            console.error("OneSignal Prompt Error:", err);
         }
     } 
     // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
