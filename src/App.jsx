@@ -77,58 +77,103 @@ const exportCSV = (data, filename) => {
 };
 
 
+const showWebNotification = (title, body) => {
+    try {
+        if (typeof window === 'undefined' || !("Notification" in window)) return;
+        if (Notification.permission === 'granted') {
+            new Notification(title, { body, icon: '/splash.png' });
+        }
+    } catch (err) {
+        console.error('Web notification error:', err);
+    }
+};
 
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
     const [showGate, setShowGate] = useState(true);
 
    useEffect(() => {
+        let foregroundListener = null;
+        let clickListener = null;
+        let nativeApi = null;
+
+        const getNativeOneSignal = () => {
+            if (OneSignal && (OneSignal.initialize || OneSignal.setAppId)) return OneSignal;
+            if (window.plugins && window.plugins.OneSignal) return window.plugins.OneSignal;
+            return null;
+        };
+
         const setupPush = async () => {
-            
-// --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
-if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-    try {
-        // v5 Syntax (Prioritized for version 5.x)
-        if (OneSignal.initialize) {
-            OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-            OneSignal.Notifications.requestPermission(true);
-        } 
-        // v3 Syntax (Fallback)
-        else if (OneSignal.setAppId) {
-            OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-            OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
-                console.log("User accepted notifications: ", accepted);
-            });
-        }
-    } catch (err) {
-        console.error("OneSignal Init Error:", err);
-    }
-}
-// --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
+            if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+                try {
+                    nativeApi = getNativeOneSignal();
+                    if (!nativeApi) {
+                        console.error('OneSignal native plugin is not available.');
+                        return;
+                    }
 
-            else {
-                if (window.OneSignalInitialized) return; 
+                    if (typeof nativeApi.initialize === 'function') {
+                        nativeApi.initialize('3a997ca5-9d8f-4e81-8943-907b81b9a577');
+
+                        if (nativeApi.Notifications && typeof nativeApi.Notifications.addEventListener === 'function') {
+                            foregroundListener = (event) => {
+                                try {
+                                    const notification = event.getNotification?.();
+                                    if (event.preventDefault) event.preventDefault();
+                                    if (notification?.display) notification.display();
+                                } catch (err) {
+                                    console.error('OneSignal foreground notification error:', err);
+                                }
+                            };
+                            nativeApi.Notifications.addEventListener('foregroundWillDisplay', foregroundListener);
+
+                            clickListener = (event) => {
+                                console.log('OneSignal notification clicked:', event);
+                            };
+                            nativeApi.Notifications.addEventListener('click', clickListener);
+                        }
+                    } else if (typeof nativeApi.setAppId === 'function') {
+                        nativeApi.setAppId('3a997ca5-9d8f-4e81-8943-907b81b9a577');
+                    }
+                } catch (err) {
+                    console.error('OneSignal native initialization error:', err);
+                }
+                return;
+            }
+
+            try {
+                if (window.OneSignalInitialized) return;
                 window.OneSignalInitialized = true;
-
                 window.OneSignalDeferred = window.OneSignalDeferred || [];
-                window.OneSignalDeferred.push(async function(OneSignal) {
+                window.OneSignalDeferred.push(async function (WebOneSignal) {
                     try {
-                        await OneSignal.init({
-                            appId: "3a997ca5-9d8f-4e81-8943-907b81b9a577",
-                            safari_web_id: "web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65",
-                            notifyButton: { enable: true }, 
-                            allowLocalhostAsSecureOrigin: true,
+                        await WebOneSignal.init({
+                            appId: '3a997ca5-9d8f-4e81-8943-907b81b9a577',
+                            safari_web_id: 'web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65',
+                            notifyButton: { enable: true },
+                            allowLocalhostAsSecureOrigin: true
                         });
                     } catch (err) {
-                        console.log("OneSignal skipped: Only runs on valid domain.");
+                        console.log('OneSignal web initialization skipped:', err);
                     }
                 });
+            } catch (err) {
+                console.error('OneSignal web setup error:', err);
             }
         };
-        
-        // THIS CALL MUST MATCH THE FUNCTION NAME EXACTLY
-        setupPush(); 
-        
+
+        setupPush();
+
+        return () => {
+            try {
+                if (nativeApi?.Notifications?.removeEventListener) {
+                    if (foregroundListener) nativeApi.Notifications.removeEventListener('foregroundWillDisplay', foregroundListener);
+                    if (clickListener) nativeApi.Notifications.removeEventListener('click', clickListener);
+                }
+            } catch (err) {
+                console.error('OneSignal listener cleanup error:', err);
+            }
+        };
     }, []);
 
     useEffect(() => {
@@ -368,16 +413,12 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
                 // If it dropped to exactly 5 (or from 6 down to 5/4/3)
                 if (prevStock > 5 && item.stock <= 5 && item.stock > 2) {
                     playAlert(); // Play beep sound
-                    if (Notification.permission === 'granted') {
-                        new Notification("⚠️ LOW STOCK ALERT", { body: `${item.name} is down to ${item.stock} units!`, icon: '/splash.png' });
-                    }
+                    showWebNotification("⚠️ LOW STOCK ALERT", `${item.name} is down to ${item.stock} units!`);
                 }
                 // If it dropped to exactly 2 (or lower)
                 else if (prevStock > 2 && item.stock <= 2) {
                     playAlert(); // Play beep sound
-                    if (Notification.permission === 'granted') {
-                        new Notification("🚨 CRITICAL STOCK ALERT", { body: `${item.name} is critically low (${item.stock} units left)!`, icon: '/splash.png' });
-                    }
+                    showWebNotification("🚨 CRITICAL STOCK ALERT", `${item.name} is critically low (${item.stock} units left)!`);
                 }
             }
             
@@ -3090,39 +3131,29 @@ const handleSaveMissingItem = async (e) => {
                     <span className="font-bold text-[22px] text-cyan-400 tracking-wide">{appName}</span>
                     
                     <div className="flex items-center">
-                        <button 
-onClick={() => {
-    // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
-    if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-        try {
-            if (window.plugins && window.plugins.OneSignal) {
-                // Safe check for v3/v5 plugins
-                if (window.plugins.OneSignal.Notifications) {
-                    window.plugins.OneSignal.Notifications.requestPermission(true).then((accepted) => {
-                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                    });
-                } else if (window.plugins.OneSignal.promptForPushNotificationsWithUserResponse) {
-                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
-                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                    });
-                }
+                        <button
+onClick={async () => {
+    try {
+        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+            const api = (OneSignal && (OneSignal.initialize || OneSignal.Notifications)) ? OneSignal : (window.plugins?.OneSignal || null);
+            if (api?.Notifications?.requestPermission) {
+                const accepted = await api.Notifications.requestPermission(true);
+                alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.');
+            } else if (api?.promptForPushNotificationsWithUserResponse) {
+                api.promptForPushNotificationsWithUserResponse((accepted) => alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.'));
             } else {
-                alert("OneSignal native plugin is loading. Please try again in a moment.");
+                alert('OneSignal is not available in this APK. Rebuild the Android project after installing/syncing the plugin.');
             }
-        } catch (err) {
-            console.error("OneSignal Prompt Error:", err);
+        } else {
+            window.OneSignalDeferred = window.OneSignalDeferred || [];
+            window.OneSignalDeferred.push(async function (WebOneSignal) {
+                try { await WebOneSignal.Slidedown.promptPush(); }
+                catch (err) { console.error('Web push prompt error:', err); }
+            });
         }
-    } 
-    // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
-    else {
-        window.OneSignalDeferred = window.OneSignalDeferred || [];
-        window.OneSignalDeferred.push(async function(OneSignal) {
-            try {
-                await OneSignal.Slidedown.promptPush();
-            } catch (err) {
-                console.log("Push prompt error:", err);
-            }
-        });
+    } catch (err) {
+        console.error('Notification permission error:', err);
+        alert('Unable to enable notifications. Check Android notification permission in Settings.');
     }
 }}
     className="p-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500 hover:text-black transition"
@@ -4377,33 +4408,31 @@ onClick={() => {
                             <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
                                 <h3 className="text-xl font-bold mb-2 text-white">Push Notifications</h3>
                                 <p className="text-sm text-gray-400 mb-4">Enable lock-screen notifications for new orders on this device.</p>
-                                <button 
-    
- onClick={() => {
-    // --- 1. NATIVE ANDROID / IOS ONLY ---
-    if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+                                <button
+    onClick={async () => {
         try {
-            if (window.plugins && window.plugins.OneSignal) {
-                if (window.plugins.OneSignal.Notifications) {
-                    window.plugins.OneSignal.Notifications.requestPermission(true).then((accepted) => {
-                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                    });
-                } else if (window.plugins.OneSignal.promptForPushNotificationsWithUserResponse) {
-                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
-                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                    });
+            if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+                const api = (OneSignal && (OneSignal.initialize || OneSignal.Notifications)) ? OneSignal : (window.plugins?.OneSignal || null);
+                if (api?.Notifications?.requestPermission) {
+                    const accepted = await api.Notifications.requestPermission(true);
+                    alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.');
+                } else if (api?.promptForPushNotificationsWithUserResponse) {
+                    api.promptForPushNotificationsWithUserResponse((accepted) => alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.'));
+                } else {
+                    alert('OneSignal is not available in this APK. Rebuild after installing/syncing the plugin.');
                 }
+            } else {
+                window.OneSignalDeferred = window.OneSignalDeferred || [];
+                window.OneSignalDeferred.push(async function (WebOneSignal) {
+                    try { await WebOneSignal.Slidedown.promptPush(); }
+                    catch (err) { console.error('Web push prompt error:', err); }
+                });
             }
         } catch (err) {
-            console.error("OneSignal Prompt Error:", err);
+            console.error('Notification permission error:', err);
+            alert('Unable to enable notifications. Check Android notification permission in Settings.');
         }
-    } 
-    // --- 2. SAFE WEB BROWSER BYPASS ---
-    else {
-        console.log("Web notification prompt clicked (Simulated on browser).");
-        alert("Push notifications are fully active when running inside the Android mobile app.");
-    }
-}}
+    }}
     className="bg-blue-500 hover:bg-blue-400 text-white font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-blue-500/20 flex items-center gap-2"
 >
     🔔 Enable Notifications
