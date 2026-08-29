@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "964794688682",
+    "project_id": "hotelvalo",
+    "storage_bucket": "hotelvalo.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:964794688682:android:6b1006a34daced71c19cd3",
+        "android_client_info": {
+          "package_name": "com.valo.admin"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBbMBkEwwYVUGwhfSd0iOe5USK5kmDdKTU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
