@@ -3,7 +3,6 @@ import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem } from '@capacitor/filesystem';
-import { NativeBiometric } from 'capacitor-native-biometric';
 
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
 const getFormattedDate = (dateObj = new Date()) => {
@@ -168,33 +167,7 @@ function AdminLogin({ onAccess }) {
     const [pin, setPin] = useState("");
     const [error, setError] = useState(false);
     const [isVerifying, setIsVerifying] = useState(false);
-    const [biometricAvailable, setBiometricAvailable] = useState(false);
     const logoUrl = '/splash.png';
-
-    // Check if the phone supports and has a Screen Lock / Face ID set up
-    useEffect(() => {
-        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-            NativeBiometric.isAvailable()
-                .then((result) => setBiometricAvailable(result.isAvailable))
-                .catch(() => setBiometricAvailable(false));
-        }
-    }, []);
-
-    const handleBiometricAuth = async () => {
-        try {
-            // This triggers the native Android Face/Fingerprint/Pattern popup
-            await NativeBiometric.verifyIdentity({
-                reason: "Access Admin Dashboard",
-                title: "Admin Login",
-                subtitle: "Use Face ID, Fingerprint, or PIN",
-                description: "Verify your identity to unlock Valo Admin"
-            });
-            // If successful, unlock the app instantly
-            onAccess(true); 
-        } catch (err) {
-            console.log("Biometric failed or cancelled:", err);
-        }
-    };
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -228,13 +201,6 @@ function AdminLogin({ onAccess }) {
                     <button type="submit" disabled={isVerifying} className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 text-md tracking-wide disabled:opacity-50">
                         {isVerifying ? 'Verifying...' : 'Verify PIN (Admin)'}
                     </button>
-
-                    {/* --- NEW BIOMETRIC / DEVICE LOCK BUTTON --- */}
-                    {biometricAvailable && (
-                        <button type="button" onClick={handleBiometricAuth} disabled={isVerifying} className="w-full bg-transparent border-2 border-cyan-500/30 text-cyan-400 font-bold py-4 rounded-2xl hover:bg-cyan-500/10 transition-all shadow-lg active:scale-95 text-sm tracking-wide mt-2 flex items-center justify-center gap-2">
-                            <span className="text-xl">😎</span> Use Device / Face Lock
-                        </button>
-                    )}
                     
                     <button type="button" onClick={() => onAccess(false)} disabled={isVerifying} className="w-full bg-slate-700 text-white font-bold py-4 rounded-2xl hover:bg-slate-600 transition-all shadow-lg active:scale-95 text-sm tracking-wide mt-2 disabled:opacity-50">
                         Continue Restricted (Staff)
@@ -252,6 +218,8 @@ function AdminDashboard() {
     const [isUnlocked, setIsUnlocked] = useState(() => localStorage.getItem('valo_unlocked') === 'true');
     const [pinModalOpen, setPinModalOpen] = useState(false);
     const [targetTab, setTargetTab] = useState(null);
+    // Add this state
+    const [actionAuth, setActionAuth] = useState({ open: false, onConfirm: null });
 
    // --- TAB CLICK ROUTER ---
     const handleTabClick = (tabId) => {
@@ -508,11 +476,7 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
         return () => { supabase.removeChannel(channel); stopAlert(); };
     }, []);
 
-    // -------------------------------------------------------------------------
-    // CRUD FUNCTIONS FOR MENU, CATEGORIES, MOMENTS & INVENTORY
-    // -------------------------------------------------------------------------
-
-    const handleSaveCategory = async (e) => {
+  const handleSaveCategory = async (e) => {
         e.preventDefault();
         const form = new FormData(e.target);
         const name = form.get('name');
@@ -523,17 +487,26 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
             imgBase64 = await fileToBase64(file);
         }
 
-        const { error } = await supabase.from('categories').insert([{ name, image: imgBase64 }]);
-        if (error) alert(error.message);
-        setCatModal(false);
-        fetchData();
+        const executeSave = async () => {
+            const { error } = await supabase.from('categories').insert([{ name, image: imgBase64 }]);
+            if (error) alert(error.message);
+            setCatModal(false);
+            fetchData();
+        };
+
+        if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeSave });
+        else executeSave();
     };
 
     const deleteCategory = async (id) => {
-        if(confirm('Delete this category?')) {
-            await supabase.from('categories').delete().eq('id', id);
-            fetchData();
-        }
+        const executeDelete = async () => {
+            if(confirm('Delete this category?')) {
+                await supabase.from('categories').delete().eq('id', id);
+                fetchData();
+            }
+        };
+        if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeDelete });
+        else executeDelete();
     };
 
     const handleSaveItem = async (e) => {
@@ -554,30 +527,51 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
             payload.img = await fileToBase64(file);
         }
 
-        if (itemModal.mode === 'add') {
-            await supabase.from('menu_items').insert([payload]);
-        } else {
-            await supabase.from('menu_items').update(payload).eq('id', itemModal.data.id);
-        }
-        setItemModal({open: false, mode: 'add', data: null});
-        fetchData();
+        // We capture whether it's an edit or add NOW before the modal resets
+        const isEdit = itemModal.mode === 'edit';
+        const targetId = isEdit ? itemModal.data.id : null;
+
+        const executeSave = async () => {
+            if (!isEdit) {
+                await supabase.from('menu_items').insert([payload]);
+            } else {
+                await supabase.from('menu_items').update(payload).eq('id', targetId);
+            }
+            setItemModal({open: false, mode: 'add', data: null});
+            fetchData();
+        };
+
+        if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeSave });
+        else executeSave();
     };
 
     const deleteItem = async (id) => {
-        if(confirm('Delete this menu item?')) {
-            await supabase.from('menu_items').delete().eq('id', id);
-            fetchData();
-        }
+        const executeDelete = async () => {
+            if(confirm('Delete this menu item?')) {
+                await supabase.from('menu_items').delete().eq('id', id);
+                fetchData();
+            }
+        };
+        if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeDelete });
+        else executeDelete();
     };
 
     const toggleSpecial = async (item) => {
-        await supabase.from('menu_items').update({ is_special: !item.is_special }).eq('id', item.id);
-        fetchData();
+        const executeToggle = async () => {
+            await supabase.from('menu_items').update({ is_special: !item.is_special }).eq('id', item.id);
+            fetchData();
+        };
+        if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeToggle });
+        else executeToggle();
     };
 
     const toggleStock = async (item) => {
-        await supabase.from('menu_items').update({ in_stock: !item.in_stock }).eq('id', item.id);
-        fetchData();
+        const executeToggle = async () => {
+            await supabase.from('menu_items').update({ in_stock: !item.in_stock }).eq('id', item.id);
+            fetchData();
+        };
+        if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeToggle });
+        else executeToggle();
     };
 
     const handleSaveMoment = async (e) => {
@@ -1927,41 +1921,38 @@ const handleSaveMissingItem = async (e) => {
         `}} />
 
         <audio ref={audioRef} loop src={alertTone} />
-
-  {/* --- SECURITY PIN MODAL --- */}
-            {pinModalOpen && (
-                <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
+{/* --- ADMIN OVERRIDE MODAL FOR MENU EDITS --- */}
+            {actionAuth.open && (
+                <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
                     <div className="bg-slate-800 border border-white/10 p-10 rounded-[3rem] shadow-2xl text-center w-full max-w-sm relative">
-                        <button onClick={() => setPinModalOpen(false)} className="absolute top-6 right-6 text-gray-400 hover:text-red-500 font-bold text-xl">✕</button>
+                        <button onClick={() => setActionAuth({open: false, onConfirm: null})} className="absolute top-6 right-6 text-gray-400 hover:text-red-500 font-bold text-xl">✕</button>
                         
-                        <div className="w-20 h-20 bg-white/5 rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-xl border border-white/5 text-3xl">🔒</div>
-                        <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">Admin Area</h2>
-                        <p className="text-gray-500 text-xs mb-8 uppercase font-bold tracking-widest">Enter PIN to unlock dashboard</p>
+                        <div className="w-20 h-20 bg-red-500/10 rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-xl border border-red-500/20 text-3xl">🛡️</div>
+                        <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">Admin Override</h2>
+                        <p className="text-gray-500 text-xs mb-8 uppercase font-bold tracking-widest">Enter Admin PIN to save changes</p>
                         
                         <form onSubmit={async (e) => {
                             e.preventDefault();
                             const enteredPin = e.target.pin.value;
                             
-                            // Check Database instead of local storage
-                            const { data, error } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
+                            const { data } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
                             const currentPin = data ? data.admin_pin : '6748'; 
 
                             if (enteredPin === currentPin) {
-                                localStorage.setItem('valo_unlocked', 'true');
-                                setIsUnlocked(true);
-                                setPinModalOpen(false);
-                                if (targetTab) setActiveTab(targetTab);
+                                setActionAuth({open: false, onConfirm: null});
+                                if (actionAuth.onConfirm) actionAuth.onConfirm();
                             } else {
-                                alert("Incorrect PIN!");
+                                alert("Incorrect PIN! Changes discarded.");
                                 e.target.reset();
                             }
                         }} className="space-y-4">
-                            <input name="pin" type="password" placeholder="••••" maxLength="4" autoFocus className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-5 text-center text-white text-3xl tracking-[0.5em] focus:outline-none focus:border-cyan-500 transition-all" />
-                            <button type="submit" className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 text-md tracking-wide">Unlock Access</button>
+                            <input name="pin" type="password" placeholder="••••" maxLength="4" autoFocus className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-5 text-center text-red-400 text-3xl tracking-[0.5em] focus:outline-none focus:border-red-500 transition-all" />
+                            <button type="submit" className="w-full bg-red-500 hover:bg-red-400 text-white font-black py-4 rounded-2xl transition-all shadow-lg active:scale-95 text-md tracking-wide">Confirm Action</button>
                         </form>
                     </div>
                 </div>
             )}
+            
             {/* CREATE BILL MODAL (MERGED) */}
             {createBillModal && (
                 <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
