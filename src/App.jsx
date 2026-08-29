@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem } from '@capacitor/filesystem';
+import { NativeBiometric } from 'capacitor-native-biometric';
 
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
 const getFormattedDate = (dateObj = new Date()) => {
@@ -80,13 +83,21 @@ export default function AdminPanel() {
     const [showGate, setShowGate] = useState(true);
 
     useEffect(() => {
-        const setupPush = async () => {
+        const setupPermissions = async () => {
             // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
             if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+                
+                // A. Request Storage Permissions on Load
+                try {
+                    await Filesystem.requestPermissions();
+                    console.log("Storage permissions handled.");
+                } catch (e) {
+                    console.log("Storage permission error:", e);
+                }
+
+                // B. Request Push Notifications
                 if (window.plugins && window.plugins.OneSignal) {
                     window.plugins.OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-                    
-                    // Automatically prompt the user for permission on mobile
                     window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
                         console.log("User accepted notifications: " + accepted);
                     });
@@ -103,7 +114,7 @@ export default function AdminPanel() {
                         await OneSignal.init({
                             appId: "3a997ca5-9d8f-4e81-8943-907b81b9a577",
                             safari_web_id: "web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65",
-                            notifyButton: { enable: true }, // Enable web bell if desired
+                            notifyButton: { enable: true }, 
                             allowLocalhostAsSecureOrigin: true,
                         });
                     } catch (err) {
@@ -112,10 +123,8 @@ export default function AdminPanel() {
                 });
             }
         };
-        setupPush();
+        setupPermissions();
     }, []);
-
-
 
     useEffect(() => {
         const timer = setTimeout(() => { setIsLoading(false); }, 3000);
@@ -134,7 +143,6 @@ export default function AdminPanel() {
     if (isLoading) return <SplashScreen />;
     if (showGate) return <AdminLogin onAccess={handleAccess} />;
 
-    // Load into the dashboard (locks are handled at the tab level based on access choice)
     return <AdminDashboard />;
 }
 // --- SPLASH SCREEN ---
@@ -156,22 +164,44 @@ function SplashScreen() {
     );
 }
 
-// --- LOGIN SCREEN ---
-// --- LOGIN SCREEN ---
-// --- LOGIN SCREEN ---
 function AdminLogin({ onAccess }) {
     const [pin, setPin] = useState("");
     const [error, setError] = useState(false);
     const [isVerifying, setIsVerifying] = useState(false);
+    const [biometricAvailable, setBiometricAvailable] = useState(false);
     const logoUrl = '/splash.png';
+
+    // Check if the phone supports and has a Screen Lock / Face ID set up
+    useEffect(() => {
+        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+            NativeBiometric.isAvailable()
+                .then((result) => setBiometricAvailable(result.isAvailable))
+                .catch(() => setBiometricAvailable(false));
+        }
+    }, []);
+
+    const handleBiometricAuth = async () => {
+        try {
+            // This triggers the native Android Face/Fingerprint/Pattern popup
+            await NativeBiometric.verifyIdentity({
+                reason: "Access Admin Dashboard",
+                title: "Admin Login",
+                subtitle: "Use Face ID, Fingerprint, or PIN",
+                description: "Verify your identity to unlock Valo Admin"
+            });
+            // If successful, unlock the app instantly
+            onAccess(true); 
+        } catch (err) {
+            console.log("Biometric failed or cancelled:", err);
+        }
+    };
 
     const handleSubmit = async (e) => {
         e.preventDefault();
         setIsVerifying(true);
         
-        // Fetch the global PIN from Supabase
         const { data, error: dbError } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
-        const currentPin = data ? data.admin_pin : '6748'; // Fallback is now 6748
+        const currentPin = data ? data.admin_pin : '6748'; 
 
         if (pin === currentPin) {
             onAccess(true); 
@@ -198,6 +228,13 @@ function AdminLogin({ onAccess }) {
                     <button type="submit" disabled={isVerifying} className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 text-md tracking-wide disabled:opacity-50">
                         {isVerifying ? 'Verifying...' : 'Verify PIN (Admin)'}
                     </button>
+
+                    {/* --- NEW BIOMETRIC / DEVICE LOCK BUTTON --- */}
+                    {biometricAvailable && (
+                        <button type="button" onClick={handleBiometricAuth} disabled={isVerifying} className="w-full bg-transparent border-2 border-cyan-500/30 text-cyan-400 font-bold py-4 rounded-2xl hover:bg-cyan-500/10 transition-all shadow-lg active:scale-95 text-sm tracking-wide mt-2 flex items-center justify-center gap-2">
+                            <span className="text-xl">😎</span> Use Device / Face Lock
+                        </button>
+                    )}
                     
                     <button type="button" onClick={() => onAccess(false)} disabled={isVerifying} className="w-full bg-slate-700 text-white font-bold py-4 rounded-2xl hover:bg-slate-600 transition-all shadow-lg active:scale-95 text-sm tracking-wide mt-2 disabled:opacity-50">
                         Continue Restricted (Staff)
@@ -207,7 +244,6 @@ function AdminLogin({ onAccess }) {
         </div>
     );
 }
-
 function AdminDashboard() {
     const [activeTab, setActiveTab] = useState('orders'); 
     const [opsTab, setOpsTab] = useState('staff');
