@@ -85,16 +85,26 @@ export default function AdminPanel() {
    useEffect(() => {
         const setupPush = async () => {
             
-            // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
-            if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-                try {
-                    // Call the imported OneSignal directly, NOT window.plugins
-                    OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-                    OneSignal.Notifications.requestPermission(true);
-                } catch (err) {
-                    console.error("OneSignal Init Error:", err);
-                }
-            }
+           // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
+if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+    try {
+        // v3 Syntax (What your project is using)
+        if (OneSignal.setAppId) {
+            OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+            OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
+                console.log("User accepted notifications: ", accepted);
+            });
+        } 
+        // v5 Syntax (Fallback)
+        else if (OneSignal.initialize) {
+            OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+            OneSignal.Notifications.requestPermission(true);
+        }
+    } catch (err) {
+        console.error("OneSignal Init Error:", err);
+    }
+}
+// --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
             // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
             else {
                 if (window.OneSignalInitialized) return; 
