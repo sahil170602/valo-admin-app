@@ -3112,7 +3112,6 @@ const handleSaveMissingItem = async (e) => {
                     <SidebarBtn icon="🛒" label={`Stock Purchases ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'purchases'} onClick={() => handleTabClick('purchases')} />    
                     <SidebarBtn icon="🧑‍🍳" label={`Operations & Staff ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'staff'} onClick={() => handleTabClick('staff')} />
                     <SidebarBtn icon="📈" label={`Analytics & Txns ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'analytics'} onClick={() => handleTabClick('analytics')} />
-                    <SidebarBtn icon="❓" label={`Missing Items ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'missing'} onClick={() => handleTabClick('missing')} />
                     <SidebarBtn icon="📦" label={`Inventory ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'inventory'} onClick={() => handleTabClick('inventory')} />
                     <SidebarBtn icon="📸" label={`Moments ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'moments'} onClick={() => handleTabClick('moments')} />
                     <SidebarBtn icon="👥" label={`Users Info ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'users'} onClick={() => handleTabClick('users')} />
