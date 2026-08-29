@@ -11,10 +11,11 @@ apply from: "../capacitor-cordova-android-plugins/cordova.variables.gradle"
 dependencies {
     implementation project(':capacitor-filesystem')
     implementation project(':capacitor-geolocation')
+    implementation project(':onesignal-capacitor-plugin')
     implementation project(':capacitor-native-biometric')
 
 }
-apply from: "../../node_modules/onesignal-cordova-plugin/build-extras-onesignal.gradle"
+
 
 if (hasProperty('postBuildExtras')) {
   postBuildExtras()
