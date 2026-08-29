@@ -82,7 +82,7 @@ export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
     const [showGate, setShowGate] = useState(true);
 
-    useEffect(() => {
+   useEffect(() => {
         const setupPush = async () => {
             // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
             if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
@@ -100,7 +100,7 @@ export default function AdminPanel() {
                         });
                     }
                 }
-            }
+            } 
             // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
             else {
                 if (window.OneSignalInitialized) return; 
@@ -121,7 +121,10 @@ export default function AdminPanel() {
                 });
             }
         };
-        setupPermissions();
+        
+        // THIS CALL MUST MATCH THE FUNCTION NAME EXACTLY
+        setupPush(); 
+        
     }, []);
 
     useEffect(() => {
