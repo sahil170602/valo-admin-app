@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { Capacitor } from '@capacitor/core';
 
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
 const getFormattedDate = (dateObj = new Date()) => {
