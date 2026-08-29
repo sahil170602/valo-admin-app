@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { Capacitor } from '@capacitor/core';
-import OneSignal from 'onesignal-cordova-plugin';
+import OneSignal from '@onesignal/capacitor-plugin';
 import { Filesystem } from '@capacitor/filesystem';
 
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
