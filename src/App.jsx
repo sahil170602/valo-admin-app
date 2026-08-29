@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { Capacitor } from '@capacitor/core';
 
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
 const getFormattedDate = (dateObj = new Date()) => {
@@ -75,28 +76,42 @@ const exportCSV = (data, filename) => {
 
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
-    const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('valo_admin_auth') === 'true');
+    const [showGate, setShowGate] = useState(true); // Controls showing the Login screen
 
     useEffect(() => {
-        const setupWebPush = async () => {
-            if (window.OneSignalInitialized) return; 
-            window.OneSignalInitialized = true;
-
-            window.OneSignalDeferred = window.OneSignalDeferred || [];
-            window.OneSignalDeferred.push(async function(OneSignal) {
-                try {
-                    await OneSignal.init({
-                        appId: "3a997ca5-9d8f-4e81-8943-907b81b9a577",
-                        safari_web_id: "web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65",
-                        notifyButton: { enable: false },
-                        allowLocalhostAsSecureOrigin: true,
+        const setupPush = async () => {
+            // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
+            // This detects if the app is running as an installed APK
+            if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+                if (window.plugins && window.plugins.OneSignal) {
+                    window.plugins.OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
+                        console.log("Mobile notifications enabled: " + accepted);
                     });
-                } catch (err) {
-                    console.log("OneSignal skipped: Only runs on valid domain.");
                 }
-            });
+            } 
+            // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
+            // This runs if accessed via Chrome/Safari or inside your Windows Electron wrapper
+            else {
+                if (window.OneSignalInitialized) return; 
+                window.OneSignalInitialized = true;
+
+                window.OneSignalDeferred = window.OneSignalDeferred || [];
+                window.OneSignalDeferred.push(async function(OneSignal) {
+                    try {
+                        await OneSignal.init({
+                            appId: "3a997ca5-9d8f-4e81-8943-907b81b9a577",
+                            safari_web_id: "web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65",
+                            notifyButton: { enable: false },
+                            allowLocalhostAsSecureOrigin: true,
+                        });
+                    } catch (err) {
+                        console.log("OneSignal skipped: Only runs on valid domain.");
+                    }
+                });
+            }
         };
-        setupWebPush();
+        setupPush();
     }, []);
 
     useEffect(() => {
@@ -104,12 +119,21 @@ export default function AdminPanel() {
         return () => clearTimeout(timer);
     }, []);
 
+    const handleAccess = (isUnlocked) => {
+        if (isUnlocked) {
+            localStorage.setItem('valo_unlocked', 'true');
+        } else {
+            localStorage.setItem('valo_unlocked', 'false'); // Staff mode
+        }
+        setShowGate(false); // Move to dashboard
+    };
+
     if (isLoading) return <SplashScreen />;
-    if (!isAuthenticated) return <AdminLogin onLogin={() => setIsAuthenticated(true)} />;
+    if (showGate) return <AdminLogin onAccess={handleAccess} />;
 
-    return <AdminDashboard onLogout={() => setIsAuthenticated(false)} />;
+    // Load into the dashboard (locks are handled at the tab level based on access choice)
+    return <AdminDashboard />;
 }
-
 // --- SPLASH SCREEN ---
 function SplashScreen() {
     const logoUrl = '/splash.png'; 
@@ -130,21 +154,30 @@ function SplashScreen() {
 }
 
 // --- LOGIN SCREEN ---
-function AdminLogin({ onLogin }) {
+// --- LOGIN SCREEN ---
+// --- LOGIN SCREEN ---
+function AdminLogin({ onAccess }) {
     const [pin, setPin] = useState("");
     const [error, setError] = useState(false);
-    const logoUrl = 'splash.png';
+    const [isVerifying, setIsVerifying] = useState(false);
+    const logoUrl = '/splash.png';
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        const currentPin = localStorage.getItem('valo_admin_pin') || '6748';
+        setIsVerifying(true);
+        
+        // Fetch the global PIN from Supabase
+        const { data, error: dbError } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
+        const currentPin = data ? data.admin_pin : '6748'; // Fallback is now 6748
+
         if (pin === currentPin) {
-            localStorage.setItem('valo_admin_auth', 'true');
-            onLogin();
+            onAccess(true); 
         } else {
-            setError(true); setPin("");
+            setError(true); 
+            setPin("");
             setTimeout(() => setError(false), 500);
         }
+        setIsVerifying(false);
     };
     
     return (
@@ -155,19 +188,57 @@ function AdminLogin({ onLogin }) {
                 </div>
                 <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">Access Locked</h2>
                 <p className="text-gray-500 text-xs mb-8 uppercase font-bold tracking-widest text-[10px]">Security Protocols Active</p>
+                
                 <form onSubmit={handleSubmit} className="space-y-4">
-                    <input type="password" value={pin} onChange={(e) => setPin(e.target.value)} autoComplete="new-password" placeholder="••••" maxLength="4" autoFocus className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-5 text-center text-white text-3xl tracking-[0.5em] focus:outline-none focus:border-cyan-500 transition-all" />
-                    <button type="submit" className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 text-md tracking-wide">Verify PIN</button>
+                    <input type="password" value={pin} onChange={(e) => setPin(e.target.value)} autoComplete="new-password" placeholder="••••" maxLength="4" autoFocus disabled={isVerifying} className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-5 text-center text-white text-3xl tracking-[0.5em] focus:outline-none focus:border-cyan-500 transition-all disabled:opacity-50" />
+                    
+                    <button type="submit" disabled={isVerifying} className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 text-md tracking-wide disabled:opacity-50">
+                        {isVerifying ? 'Verifying...' : 'Verify PIN (Admin)'}
+                    </button>
+                    
+                    <button type="button" onClick={() => onAccess(false)} disabled={isVerifying} className="w-full bg-slate-700 text-white font-bold py-4 rounded-2xl hover:bg-slate-600 transition-all shadow-lg active:scale-95 text-sm tracking-wide mt-2 disabled:opacity-50">
+                        Continue Restricted (Staff)
+                    </button>
                 </form>
             </div>
         </div>
     );
 }
 
-// --- MAIN DASHBOARD ---
-function AdminDashboard({ onLogout }) {
+function AdminDashboard() {
     const [activeTab, setActiveTab] = useState('orders'); 
     const [opsTab, setOpsTab] = useState('staff');
+    
+    // --- TAB-LEVEL SECURITY STATES ---
+    const [isUnlocked, setIsUnlocked] = useState(() => localStorage.getItem('valo_unlocked') === 'true');
+    const [pinModalOpen, setPinModalOpen] = useState(false);
+    const [targetTab, setTargetTab] = useState(null);
+
+   // --- TAB CLICK ROUTER ---
+    const handleTabClick = (tabId) => {
+        // Unlocked Tabs (Staff can access these anytime)
+        if (tabId === 'orders' || tabId === 'history' || tabId === 'create_bill' || tabId === 'menu') {
+            setActiveTab(tabId);
+            setIsSidebarOpen(false);
+        } else {
+            // Locked Tabs require authentication
+            if (isUnlocked) {
+                setActiveTab(tabId);
+                setIsSidebarOpen(false);
+            } else {
+                setTargetTab(tabId);
+                setPinModalOpen(true);
+                setIsSidebarOpen(false);
+            }
+        }
+    };
+
+    const handleLockApp = () => {
+        localStorage.setItem('valo_unlocked', 'false'); // Lock it instantly
+        setIsUnlocked(false);
+        setActiveTab('orders'); // Safely kick them back to orders
+        alert("App Locked! Admin areas are now secured.");
+    };
     
     const [appName, setAppName] = useState(() => localStorage.getItem('valo_app_name') || 'VALO');
     const [alertTone, setAlertTone] = useState(() => localStorage.getItem('valo_alert_tone') || 'https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
@@ -178,6 +249,7 @@ function AdminDashboard({ onLogout }) {
     const [menuItems, setMenuItems] = useState([]);
     const [moments, setMoments] = useState([]);
     const [inventoryItems, setInventoryItems] = useState([]);
+    const [inventoryCategoryFilter, setInventoryCategoryFilter] = useState('All');
     const [expenses, setExpenses] = useState([]);
     const [staffExpenses, setStaffExpenses] = useState([]);
     const [missingItemsData, setMissingItemsData] = useState([]);
@@ -232,8 +304,8 @@ function AdminDashboard({ onLogout }) {
 
     // New Modals
     const [staffModal, setStaffModal] = useState({ open: false });
-    const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null });
-    const [staffShowSugg, setStaffShowSugg] = useState(false);
+// Find this line around line 147:
+const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null, expenseType: 'item' });    const [staffShowSugg, setStaffShowSugg] = useState(false);
     const [isCustomStaff, setIsCustomStaff] = useState(false);
     const [activeStaff, setActiveStaff] = useState('');
 
@@ -495,23 +567,24 @@ function AdminDashboard({ onLogout }) {
         }
     };
 
-    const handleSaveInventory = async (e) => {
-        e.preventDefault();
-        const form = new FormData(e.target);
-        const payload = {
-            name: form.get('name'),
-            barcode: form.get('barcode'),
-            stock: Number(form.get('stock')),
-            price: Number(form.get('price'))
-        };
-        if (invModal.mode === 'add') {
-            await supabase.from('inventory_items').insert([payload]);
-        } else {
-            await supabase.from('inventory_items').update(payload).eq('id', invModal.data.id);
-        }
-        setInvModal({open: false, mode: 'add', data: null});
-        fetchData();
+  const handleSaveInventory = async (e) => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const payload = {
+        name: form.get('name'),
+        category: form.get('category'), // Captures Food or Inventory
+        barcode: form.get('barcode'),
+        stock: Number(form.get('stock')),
+        price: Number(form.get('price'))
     };
+    if (invModal.mode === 'add') {
+        await supabase.from('inventory_items').insert([payload]);
+    } else {
+        await supabase.from('inventory_items').update(payload).eq('id', invModal.data.id);
+    }
+    setInvModal({open: false, mode: 'add', data: null});
+    fetchData();
+};
 
     const deleteInventoryItem = async (id) => {
         if(confirm('Delete this inventory item?')) {
@@ -524,47 +597,55 @@ function AdminDashboard({ onLogout }) {
     // NEW STAFF & MISSING ITEMS FUNCTIONS
     // -------------------------------------------------------------------------
 
-    const handleSaveStaffExpense = async (e) => {
-        e.preventDefault();
-        if (!staffForm.staff_name || !staffForm.name || staffForm.qty < 1) return;
-        
-        const payload = {
-            staff_name: staffForm.staff_name,
-            item_name: staffForm.name,
-            qty: Number(staffForm.qty),
-            price: Number(staffForm.price),
-            total: Number(staffForm.qty) * Number(staffForm.price),
-            is_inv: staffForm.isInv,
-            inv_id: staffForm.invId,
-            date: getFormattedDate(),
-            time: getFormattedTime(),
-            timestamp: Date.now()
-        };
+   // Find handleSaveStaffExpense around line 335 and update it:
+const handleSaveStaffExpense = async (e) => {
+    e.preventDefault();
+    if (!staffForm.staff_name || !staffForm.name || staffForm.qty < 1) return;
+    
+    const isMoneyExpense = staffForm.expenseType === 'money' || staffForm.name === 'Money';
 
-        if (payload.is_inv && payload.inv_id) {
-            const invItem = inventoryItems.find(i => i.id === payload.inv_id);
-            if (invItem) {
-                if (invItem.stock < payload.qty) {
-                    alert("Not enough stock in inventory!");
-                    return;
-                }
-                await supabase.from('inventory_items').update({ stock: invItem.stock - payload.qty }).eq('id', invItem.id);
-            }
-        }
-
-        await supabase.from('staff_expenses').insert([payload]);
-        setStaffModal({ open: false });
-        setActiveStaff(payload.staff_name);
-        setStaffForm({ staff_name: payload.staff_name, name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null });
-        fetchData();
+    const payload = {
+        staff_name: staffForm.staff_name,
+        item_name: isMoneyExpense ? 'Money' : staffForm.name,
+        qty: isMoneyExpense ? 1 : Number(staffForm.qty),
+        price: Number(staffForm.price),
+        total: (isMoneyExpense ? 1 : Number(staffForm.qty)) * Number(staffForm.price),
+        is_inv: isMoneyExpense ? false : staffForm.isInv,
+        inv_id: isMoneyExpense ? null : staffForm.invId,
+        date: getFormattedDate(),
+        time: getFormattedTime(),
+        timestamp: Date.now()
     };
 
+    if (!isMoneyExpense && payload.is_inv && payload.inv_id) {
+        const invItem = inventoryItems.find(i => i.id === payload.inv_id);
+        if (invItem) {
+            if (invItem.stock < payload.qty) {
+                alert("Not enough stock in inventory!");
+                return;
+            }
+            await supabase.from('inventory_items').update({ stock: invItem.stock - payload.qty }).eq('id', invItem.id);
+        }
+    }
+
+    await supabase.from('staff_expenses').insert([payload]);
+    setStaffModal({ open: false });
+    setActiveStaff(payload.staff_name);
+    setStaffForm({ staff_name: payload.staff_name, name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null, expenseType: 'item' });
+    fetchData();
+};
     const deleteStaffExpense = async (id) => {
         if(confirm('Remove this record? (Note: Stock is NOT refunded automatically)')) {
             await supabase.from('staff_expenses').delete().eq('id', id);
             fetchData();
         }
     };
+    const deleteMissingItem = async (id) => {
+    if (confirm('Are you sure you want to delete this loss/defect record? (Note: Stock is NOT automatically refunded)')) {
+        await supabase.from('missing_items').delete().eq('id', id);
+        fetchData();
+    }
+};
 
 const handleSaveMissingItem = async (e) => {
         e.preventDefault();
@@ -610,53 +691,73 @@ const handleSaveMissingItem = async (e) => {
         }
     };
 
-   const handleSavePurchase = async (e) => {
-        e.preventDefault();
-        if (!purchaseForm.name || purchaseForm.qty < 1) return;
-        
-        const totalCost = Number(purchaseForm.qty) * Number(purchaseForm.price);
+ const handleSavePurchase = async (e) => {
+    e.preventDefault();
+    if (!purchaseForm.name || purchaseForm.qty < 1) return;
+    
+    const totalCost = Number(purchaseForm.qty) * Number(purchaseForm.price);
+    const isFood = purchaseForm.type === 'Food';
 
-        const payload = {
-            purchase_type: purchaseForm.type,
-            item_name: purchaseForm.name,
-            inv_id: purchaseForm.invId,
-            qty: Number(purchaseForm.qty),
-            unit_price: Number(purchaseForm.price),
-            total_cost: totalCost,
-            payment_mode: purchaseForm.mode,
-            date: getFormattedDate(),
-            time: getFormattedTime(),
-            timestamp: Date.now()
-        };
+    const payload = {
+        purchase_type: purchaseForm.type, // 'Food' or 'Inventory'
+        item_name: purchaseForm.name,
+        inv_id: isFood ? null : purchaseForm.invId,
+        qty: Number(purchaseForm.qty),
+        unit_price: Number(purchaseForm.price),
+        total_cost: totalCost,
+        payment_mode: purchaseForm.mode,
+        date: getFormattedDate(),
+        time: getFormattedTime(),
+        timestamp: Date.now()
+    };
 
-        // 1. AUTO-INCREASE INVENTORY STOCK
-        if (payload.purchase_type === 'Inventory' && payload.inv_id) {
+    if (isFood) {
+        // --- ROUTE 1: FOOD GOES TO STOCK PURCHASES ---
+        await supabase.from('stock_purchases').insert([payload]);
+    } else {
+        // --- ROUTE 2: INVENTORY UPDATES THE INVENTORY TABLE ---
+        if (payload.inv_id) {
             const invItem = inventoryItems.find(i => i.id === payload.inv_id);
             if (invItem) {
                 const newStockAmount = Number(invItem.stock) + Number(payload.qty);
                 await supabase.from('inventory_items').update({ stock: newStockAmount }).eq('id', invItem.id);
             }
+        } else {
+            // Check if inventory item exists by name, else insert new inventory item
+            const existingItem = inventoryItems.find(i => i.name.toLowerCase() === payload.item_name.toLowerCase());
+            if (existingItem) {
+                const newStockAmount = Number(existingItem.stock) + Number(payload.qty);
+                await supabase.from('inventory_items').update({ stock: newStockAmount }).eq('id', existingItem.id);
+            } else {
+                await supabase.from('inventory_items').insert([{
+                    name: payload.item_name,
+                    category: 'Inventory',
+                    barcode: `AUTO-${Math.floor(100000 + Math.random() * 900000)}`,
+                    stock: Number(payload.qty),
+                    price: Number(payload.unit_price)
+                }]);
+            }
         }
-
-        // 2. LOG PURCHASE IN DATABASE
+        // Also log the inventory purchase event
         await supabase.from('stock_purchases').insert([payload]);
+    }
 
-        // 3. AUTO-LOG TO EXPENSE LEDGER
-        const newExpense = {
-            date: payload.date,
-            time: payload.time,
-            timestamp: payload.timestamp,
-            amount: totalCost,
-            description: `[Restock] ${payload.item_name} (Qty: ${payload.qty})`,
-            mode: payload.payment_mode
-        };
-        await supabase.from('expenses').insert([newExpense]);
-
-        setPurchaseModal({ open: false });
-        setPurchaseForm({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash' });
-        fetchData();
-        alert("Stock increased and purchase logged successfully!");
+    // 3. AUTO-LOG TO EXPENSE LEDGER
+    const newExpense = {
+        date: payload.date,
+        time: payload.time,
+        timestamp: payload.timestamp,
+        amount: totalCost,
+        description: `[Restock] ${payload.item_name} (Qty: ${payload.qty})`,
+        mode: payload.payment_mode
     };
+    await supabase.from('expenses').insert([newExpense]);
+
+    setPurchaseModal({ open: false });
+    setPurchaseForm({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash' });
+    fetchData();
+    alert("Purchase recorded and synced successfully!");
+};
 
     const generateItemNamesString = (itemsObj, customItemsArr) => {
         let names = [];
@@ -1764,11 +1865,18 @@ const handleSaveMissingItem = async (e) => {
     });
 
     const filteredInventory = inventoryItems
-        .filter(item => 
+    .filter(item => {
+        // 1. Match category filter ('All', 'Inventory', or 'Food')
+        const matchesCategory = inventoryCategoryFilter === 'All' || item.category === inventoryCategoryFilter;
+        
+        // 2. Match search query (safely handling cases where barcode might be null/undefined)
+        const matchesSearch = 
             item.name.toLowerCase().includes(inventorySearchQuery.toLowerCase()) || 
-            item.barcode.toLowerCase().includes(inventorySearchQuery.toLowerCase())
-        )
-        .sort((a, b) => a.name.localeCompare(b.name));
+            (item.barcode || '').toLowerCase().includes(inventorySearchQuery.toLowerCase());
+            
+        return matchesCategory && matchesSearch;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 
    return (
     <div className="h-screen w-full bg-slate-900 text-white font-sans flex overflow-hidden">
@@ -1780,6 +1888,41 @@ const handleSaveMissingItem = async (e) => {
         `}} />
 
         <audio ref={audioRef} loop src={alertTone} />
+
+  {/* --- SECURITY PIN MODAL --- */}
+            {pinModalOpen && (
+                <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
+                    <div className="bg-slate-800 border border-white/10 p-10 rounded-[3rem] shadow-2xl text-center w-full max-w-sm relative">
+                        <button onClick={() => setPinModalOpen(false)} className="absolute top-6 right-6 text-gray-400 hover:text-red-500 font-bold text-xl">✕</button>
+                        
+                        <div className="w-20 h-20 bg-white/5 rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-xl border border-white/5 text-3xl">🔒</div>
+                        <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">Admin Area</h2>
+                        <p className="text-gray-500 text-xs mb-8 uppercase font-bold tracking-widest">Enter PIN to unlock dashboard</p>
+                        
+                        <form onSubmit={async (e) => {
+                            e.preventDefault();
+                            const enteredPin = e.target.pin.value;
+                            
+                            // Check Database instead of local storage
+                            const { data, error } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
+                            const currentPin = data ? data.admin_pin : '6748'; 
+
+                            if (enteredPin === currentPin) {
+                                localStorage.setItem('valo_unlocked', 'true');
+                                setIsUnlocked(true);
+                                setPinModalOpen(false);
+                                if (targetTab) setActiveTab(targetTab);
+                            } else {
+                                alert("Incorrect PIN!");
+                                e.target.reset();
+                            }
+                        }} className="space-y-4">
+                            <input name="pin" type="password" placeholder="••••" maxLength="4" autoFocus className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-5 text-center text-white text-3xl tracking-[0.5em] focus:outline-none focus:border-cyan-500 transition-all" />
+                            <button type="submit" className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 text-md tracking-wide">Unlock Access</button>
+                        </form>
+                    </div>
+                </div>
+            )}
             {/* CREATE BILL MODAL (MERGED) */}
             {createBillModal && (
                 <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
@@ -1908,7 +2051,7 @@ const handleSaveMissingItem = async (e) => {
                 </div>
             )}
 
-            {/* --- STAFF EXPENSES MODAL --- */}
+           {/* --- STAFF EXPENSES MODAL --- */}
             {staffModal.open && (
                 <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
                     <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-white/10 shadow-2xl relative">
@@ -1938,62 +2081,98 @@ const handleSaveMissingItem = async (e) => {
                                 )}
                             </div>
                             
-                            <div className="relative">
-                                <label className="text-xs text-gray-400">Search Item (Menu or Inventory)</label>
-                                <input 
-                                    type="text" 
-                                    placeholder="Search item..." 
-                                    className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500"
-                                    value={staffForm.name}
-                                    onChange={e => {
-                                        setStaffForm({...staffForm, name: e.target.value, menuId: null, invId: null, isInv: false});
-                                        setStaffShowSugg(true);
-                                    }}
-                                    onFocus={() => setStaffShowSugg(true)}
-                                    onBlur={() => setTimeout(() => setStaffShowSugg(false), 200)}
-                                    required
-                                />
-                                {staffShowSugg && staffForm.name && (
-                                    <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
-                                        {staffModalSuggestions.map(item => {
-                                            const isInv = item.barcode !== undefined;
-                                            return (
-                                                <div key={isInv ? `inv_${item.id}` : `menu_${item.id}`} onMouseDown={(e) => {
-                                                    e.preventDefault();
-                                                    setStaffForm({
-                                                        ...staffForm,
-                                                        name: item.name,
-                                                        price: parseInt(String(item.price).replace(/[^0-9]/g, '')) || 0,
-                                                        menuId: isInv ? null : item.id,
-                                                        invId: isInv ? item.id : null,
-                                                        isInv: isInv
-                                                    });
-                                                    setStaffShowSugg(false);
-                                                }} className="p-3 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between items-center text-xs">
-                                                    <span className="font-bold">{item.name} {isInv && <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded" title="Inventory Item">📦 In Stock: {item.stock}</span>}</span>
-                                                    <span className="font-bold font-mono text-xs">₹{item.price}</span>
-                                                </div>
-                                            );
-                                        })}
-                                        {staffModalSuggestions.length === 0 && <div className="p-3 text-gray-400 text-xs italic">Custom item will be created. Type price manually.</div>}
-                                    </div>
-                                )}
+                            {/* --- NEW: TOGGLE BETWEEN INVENTORY ITEM AND DIRECT MONEY --- */}
+                            <div>
+                                <label className="text-xs text-gray-400 mb-1 block">Expense Category</label>
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setStaffForm({...staffForm, expenseType: 'item', name: '', price: '', qty: 1, isInv: false, invId: null, menuId: null})}
+                                        className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition ${(!staffForm.expenseType || staffForm.expenseType === 'item') ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-black/30 text-gray-400 hover:text-white'}`}
+                                    >
+                                        📦 Inventory Item
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setStaffForm({...staffForm, expenseType: 'money', name: 'Money', price: '', qty: 1, isInv: false, invId: null, menuId: null})}
+                                        className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition ${staffForm.expenseType === 'money' ? 'bg-green-500 text-black shadow-lg shadow-green-500/20' : 'bg-black/30 text-gray-400 hover:text-white'}`}
+                                    >
+                                        💵 Direct Money / Advance
+                                    </button>
+                                </div>
                             </div>
 
-                            <div className="flex gap-4">
-                                <div className="flex-1">
-                                    <label className="text-xs text-gray-400">Quantity</label>
-                                    <input type="number" min="1" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" value={staffForm.qty} onChange={e => setStaffForm({...staffForm, qty: e.target.value})} required />
+                            {/* --- CONDITIONAL FIELD RENDERING --- */}
+                            {(!staffForm.expenseType || staffForm.expenseType === 'item') ? (
+                                <div className="relative">
+                                    <label className="text-xs text-gray-400">Search Item (Menu or Inventory)</label>
+                                    <input 
+                                        type="text" 
+                                        placeholder="Search item..." 
+                                        className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500"
+                                        value={staffForm.name}
+                                        onChange={e => {
+                                            setStaffForm({...staffForm, name: e.target.value, menuId: null, invId: null, isInv: false});
+                                            setStaffShowSugg(true);
+                                        }}
+                                        onFocus={() => setStaffShowSugg(true)}
+                                        onBlur={() => setTimeout(() => setStaffShowSugg(false), 200)}
+                                        required
+                                    />
+                                    {staffShowSugg && staffForm.name && (
+                                        <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
+                                            {staffModalSuggestions.map(item => {
+                                                const isInv = item.barcode !== undefined;
+                                                return (
+                                                    <div key={isInv ? `inv_${item.id}` : `menu_${item.id}`} onMouseDown={(e) => {
+                                                        e.preventDefault();
+                                                        setStaffForm({
+                                                            ...staffForm,
+                                                            name: item.name,
+                                                            price: parseInt(String(item.price).replace(/[^0-9]/g, '')) || 0,
+                                                            menuId: isInv ? null : item.id,
+                                                            invId: isInv ? item.id : null,
+                                                            isInv: isInv
+                                                        });
+                                                        setStaffShowSugg(false);
+                                                    }} className="p-3 hover:bg-cyan-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between items-center text-xs">
+                                                        <span className="font-bold">{item.name} {isInv && <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded" title="Inventory Item">📦 In Stock: {item.stock}</span>}</span>
+                                                        <span className="font-bold font-mono text-xs">₹{item.price}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                            {staffModalSuggestions.length === 0 && <div className="p-3 text-gray-400 text-xs italic">Custom item will be created. Type price manually.</div>}
+                                        </div>
+                                    )}
                                 </div>
+                            ) : (
+                                <div>
+                                    <label className="text-xs text-gray-400">Expense Type</label>
+                                    <input 
+                                        type="text" 
+                                        value="Money (Direct Cash / Advance)" 
+                                        disabled 
+                                        className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-green-400 font-bold mt-1 cursor-not-allowed" 
+                                    />
+                                </div>
+                            )}
+
+                            <div className="flex gap-4">
+                                {(!staffForm.expenseType || staffForm.expenseType === 'item') && (
+                                    <div className="flex-1">
+                                        <label className="text-xs text-gray-400">Quantity</label>
+                                        <input type="number" min="1" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" value={staffForm.qty} onChange={e => setStaffForm({...staffForm, qty: e.target.value})} required />
+                                    </div>
+                                )}
                                 <div className="flex-1">
-                                    <label className="text-xs text-gray-400">Price per unit (₹)</label>
+                                    <label className="text-xs text-gray-400">{staffForm.expenseType === 'money' ? 'Amount Given (₹)' : 'Price per unit (₹)'}</label>
                                     <input type="number" min="0" className={`w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none ${staffForm.menuId || staffForm.invId ? 'opacity-50 cursor-not-allowed' : 'focus:border-cyan-500'}`} value={staffForm.price} onChange={e => setStaffForm({...staffForm, price: e.target.value})} disabled={!!staffForm.menuId || !!staffForm.invId} required />
                                 </div>
                             </div>
                             
                             <div className="flex justify-between items-center bg-black/50 p-3 rounded-lg border border-white/5">
                                 <span className="text-sm text-gray-400">Total Deduction:</span>
-                                <span className="text-xl font-black text-red-400">-₹{(Number(staffForm.qty) || 0) * (Number(staffForm.price) || 0)}</span>
+                                <span className="text-xl font-black text-red-400">-₹{(staffForm.expenseType === 'money' ? 1 : (Number(staffForm.qty) || 0)) * (Number(staffForm.price) || 0)}</span>
                             </div>
 
                             <div className="flex gap-2 mt-4">
@@ -2088,48 +2267,88 @@ const handleSaveMissingItem = async (e) => {
                 </div>
             )}
 
-           {/* --- PURCHASE MODAL --- */}
-            {purchaseModal.open && (
-                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
-                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-white/10 shadow-2xl relative">
-                        <h3 className="text-xl font-bold mb-4 text-green-400">Record Inventory Purchase</h3>
-                        <p className="text-xs text-gray-400 mb-4">Selecting an item below will automatically increase its stock count.</p>
-                        <form onSubmit={handleSavePurchase} className="space-y-4">
-                            
-                            <div className="relative">
-                                <label className="text-xs text-gray-400">Search Existing Inventory</label>
-                                <input type="text" placeholder="Search inventory to restock..." className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.name} onChange={e => { setPurchaseForm({...purchaseForm, name: e.target.value, invId: null}); setPurchaseShowSugg(true); }} onFocus={() => setPurchaseShowSugg(true)} onBlur={() => setTimeout(() => setPurchaseShowSugg(false), 200)} required />
-                                {purchaseShowSugg && purchaseForm.name && (
-                                    <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
-                                        {inventoryItems.filter(i => i.name.toLowerCase().includes(purchaseForm.name.toLowerCase())).map(item => (
-                                            <div key={item.id} onMouseDown={(e) => { e.preventDefault(); setPurchaseForm({...purchaseForm, name: item.name, invId: item.id}); setPurchaseShowSugg(false); }} className="p-3 hover:bg-green-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between items-center text-xs">
-                                                <span className="font-bold">{item.name} <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded">Current Stock: {item.stock}</span></span>
-                                            </div>
-                                        ))}
-                                        {inventoryItems.filter(i => i.name.toLowerCase().includes(purchaseForm.name.toLowerCase())).length === 0 && <div className="p-3 text-gray-400 text-xs italic">Item not found. Will save as regular food/text purchase.</div>}
+         {/* --- PURCHASE MODAL --- */}
+{purchaseModal.open && (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+        <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-white/10 shadow-2xl relative">
+            <h3 className="text-xl font-bold mb-4 text-green-400">Record Stock Purchase</h3>
+            <p className="text-xs text-gray-400 mb-4">Selecting an item below will automatically increase its stock count.</p>
+            <form onSubmit={handleSavePurchase} className="space-y-4">
+                
+                {/* --- NEW: CATEGORY SELECTOR (Food vs Inventory) --- */}
+                <div>
+                    <label className="text-xs text-gray-400 mb-1 block">Purchase Category</label>
+                    <select 
+                        className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500 font-bold" 
+                        value={purchaseForm.type} 
+                        onChange={e => setPurchaseForm({...purchaseForm, type: e.target.value, name: '', invId: ''})}
+                    >
+                        <option value="Inventory">📦 Inventory</option>
+                        <option value="Food">🍔 Food</option>
+                    </select>
+                </div>
+
+                <div className="relative">
+                    <label className="text-xs text-gray-400">
+                        {purchaseForm.type === 'Inventory' ? 'Search Existing Inventory' : 'Enter or Select Food Item'}
+                    </label>
+                    <input 
+                        type="text" 
+                        placeholder={purchaseForm.type === 'Inventory' ? "Search inventory to restock..." : "Type food item name..."} 
+                        className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" 
+                        value={purchaseForm.name} 
+                        onChange={e => { setPurchaseForm({...purchaseForm, name: e.target.value, invId: null}); setPurchaseShowSugg(true); }} 
+                        onFocus={() => setPurchaseShowSugg(true)} 
+                        onBlur={() => setTimeout(() => setPurchaseShowSugg(false), 200)} 
+                        required 
+                    />
+                    
+                    {/* --- FILTERED SUGGESTIONS DROPDOWN --- */}
+                    {purchaseShowSugg && purchaseForm.name && purchaseForm.type === 'Inventory' && (
+                        <div className="absolute top-full left-0 w-full mt-1 bg-slate-700 border border-white/10 rounded-lg shadow-xl max-h-40 overflow-y-auto z-[100]">
+                            {inventoryItems
+                                .filter(i => i.name.toLowerCase().includes(purchaseForm.name.toLowerCase()))
+                                .map(item => (
+                                    <div key={item.id} onMouseDown={(e) => { e.preventDefault(); setPurchaseForm({...purchaseForm, name: item.name, invId: item.id}); setPurchaseShowSugg(false); }} className="p-3 hover:bg-green-500 hover:text-black cursor-pointer border-b border-white/5 last:border-0 flex justify-between items-center text-xs">
+                                        <span className="font-bold">{item.name} <span className="ml-2 text-[10px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded">Current Stock: {item.stock}</span></span>
                                     </div>
-                                )}
-                            </div>
+                                ))}
+                        </div>
+                    )}
+                </div>
 
-                            <div className="flex gap-4">
-                                <div className="flex-1"><label className="text-xs text-gray-400">Qty Bought</label><input type="number" min="1" step="any" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.qty} onChange={e => setPurchaseForm({...purchaseForm, qty: e.target.value})} required /></div>
-                                <div className="flex-1"><label className="text-xs text-gray-400">Price per unit (₹)</label><input type="number" min="0" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.price} onChange={e => setPurchaseForm({...purchaseForm, price: e.target.value})} required /></div>
-                            </div>
-                            
-                            <div>
-                                <label className="text-xs text-gray-400">Paid Via</label>
-                                <select className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.mode} onChange={e => setPurchaseForm({...purchaseForm, mode: e.target.value})}>
-                                    <option value="Cash">Cash</option>
-                                    <option value="Online">Online</option>
-                                </select>
-                            </div>
-
-                            <div className="flex justify-between items-center bg-black/50 p-3 rounded-lg border border-white/5"><span className="text-sm text-gray-400">Total Purchase Cost:</span><span className="text-xl font-black text-red-400">₹{(Number(purchaseForm.qty) || 0) * (Number(purchaseForm.price) || 0)}</span></div>
-                            <div className="flex gap-2 mt-4"><button type="button" onClick={() => setPurchaseModal({open: false})} className="flex-1 bg-slate-700 text-white py-3 rounded-xl hover:bg-slate-600 transition">Cancel</button><button type="submit" className="flex-1 bg-green-500 text-black font-bold py-3 rounded-xl hover:bg-green-400 transition">Save Purchase</button></div>
-                        </form>
+                <div className="flex gap-4">
+                    <div className="flex-1">
+                        <label className="text-xs text-gray-400">Qty Bought</label>
+                        <input type="number" min="1" step="any" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.qty} onChange={e => setPurchaseForm({...purchaseForm, qty: e.target.value})} required />
+                    </div>
+                    <div className="flex-1">
+                        <label className="text-xs text-gray-400">Price per unit (₹)</label>
+                        <input type="number" min="0" className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.price} onChange={e => setPurchaseForm({...purchaseForm, price: e.target.value})} required />
                     </div>
                 </div>
-            )}
+                
+                <div>
+                    <label className="text-xs text-gray-400">Paid Via</label>
+                    <select className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500" value={purchaseForm.mode} onChange={e => setPurchaseForm({...purchaseForm, mode: e.target.value})}>
+                        <option value="Cash">Cash</option>
+                        <option value="Online">Online</option>
+                    </select>
+                </div>
+
+                <div className="flex justify-between items-center bg-black/50 p-3 rounded-lg border border-white/5">
+                    <span className="text-sm text-gray-400">Total Purchase Cost:</span>
+                    <span className="text-xl font-black text-red-400">₹{(Number(purchaseForm.qty) || 0) * (Number(purchaseForm.price) || 0)}</span>
+                </div>
+                
+                <div className="flex gap-2 mt-4">
+                    <button type="button" onClick={() => setPurchaseModal({open: false})} className="flex-1 bg-slate-700 text-white py-3 rounded-xl hover:bg-slate-600 transition">Cancel</button>
+                    <button type="submit" className="flex-1 bg-green-500 text-black font-bold py-3 rounded-xl hover:bg-green-400 transition">Save Purchase</button>
+                </div>
+            </form>
+        </div>
+    </div>
+)}
 
             {/* --- PURCHASE ITEM DETAILS MODAL --- */}
             {selectedPurchaseItem && (() => {
@@ -2314,38 +2533,45 @@ const handleSaveMissingItem = async (e) => {
             )}
 
             
-            {/* --- INVENTORY MODAL --- */}
-            {invModal.open && (
-                <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
-                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-sm border border-white/10 shadow-2xl relative">
-                        <h3 className="text-xl font-bold mb-4">{invModal.mode === 'edit' ? 'Edit Inventory Item' : 'Add Inventory Item'}</h3>
-                        <form onSubmit={handleSaveInventory} className="space-y-4">
-                            <div>
-                                <label className="text-xs text-gray-400">Item Name</label>
-                                <input name="name" defaultValue={invModal.data?.name} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-400">Barcode</label>
-                                <input name="barcode" defaultValue={invModal.data?.barcode} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
-                            </div>
-                            <div className="flex gap-4">
-                                <div className="flex-1">
-                                    <label className="text-xs text-gray-400">Stock Qty</label>
-                                    <input name="stock" type="number" min="0" defaultValue={invModal.data?.stock} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
-                                </div>
-                                <div className="flex-1">
-                                    <label className="text-xs text-gray-400">Price (₹)</label>
-                                    <input name="price" type="number" min="0" defaultValue={invModal.data?.price} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1" required />
-                                </div>
-                            </div>
-                            <div className="flex gap-2 mt-4">
-                                <button type="button" onClick={() => setInvModal({open: false, mode: 'add', data: null})} className="flex-1 bg-red-500/20 text-red-400 py-3 rounded-xl">Cancel</button>
-                                <button type="submit" className="flex-1 bg-cyan-500 text-black font-bold py-3 rounded-xl">Save</button>
-                            </div>
-                        </form>
+          {/* --- INVENTORY MODAL --- */}
+{invModal.open && (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+        <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-sm border border-white/10 shadow-2xl relative">
+            <h3 className="text-xl font-bold mb-4">{invModal.mode === 'edit' ? 'Edit Inventory Item' : 'Add Inventory Item'}</h3>
+            <form onSubmit={handleSaveInventory} className="space-y-4">
+                <div>
+                    <label className="text-xs text-gray-400">Item Name</label>
+                    <input name="name" defaultValue={invModal.data?.name} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" required />
+                </div>
+                <div>
+                    <label className="text-xs text-gray-400">Category</label>
+                    <select name="category" defaultValue={invModal.data?.category || 'Inventory'} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500 font-bold">
+                        <option value="Inventory">📦 Inventory</option>
+                        <option value="Food">🍔 Food</option>
+                    </select>
+                </div>
+                <div>
+                    <label className="text-xs text-gray-400">Barcode</label>
+                    <input name="barcode" defaultValue={invModal.data?.barcode} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" required />
+                </div>
+                <div className="flex gap-4">
+                    <div className="flex-1">
+                        <label className="text-xs text-gray-400">Stock Qty</label>
+                        <input name="stock" type="number" min="0" defaultValue={invModal.data?.stock} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" required />
+                    </div>
+                    <div className="flex-1">
+                        <label className="text-xs text-gray-400">Price (₹)</label>
+                        <input name="price" type="number" min="0" defaultValue={invModal.data?.price} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" required />
                     </div>
                 </div>
-            )}
+                <div className="flex gap-2 mt-4">
+                    <button type="button" onClick={() => setInvModal({open: false, mode: 'add', data: null})} className="flex-1 bg-red-500/20 text-red-400 py-3 rounded-xl hover:bg-red-500 hover:text-white transition">Cancel</button>
+                    <button type="submit" className="flex-1 bg-cyan-500 text-black font-bold py-3 rounded-xl hover:bg-cyan-400 transition">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+)}
 
             {/* --- EYE ICON MODAL (ORDER DETAILS) --- */}
             {viewOrderDetails && (
@@ -2794,26 +3020,34 @@ const handleSaveMissingItem = async (e) => {
                 </div>
             )}
 
-            {/* SIDEBAR */}
+          {/* SIDEBAR */}
             {isSidebarOpen && (<div onClick={() => setIsSidebarOpen(false)} className="fixed inset-0 bg-black/80 z-40 md:hidden backdrop-blur-sm animate-fade-in"></div>)}
             <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 border-r border-white/10 p-6 flex flex-col transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}`}>
                 <div className="flex justify-between items-center mb-10"><div className="flex items-center gap-3"><div className="w-10 h-10 bg-cyan-500 rounded-lg flex items-center justify-center font-bold text-black text-xl">{appName.charAt(0).toUpperCase()}</div><div><h1 className="text-md font-bold font-serif tracking-wide">{appName.toUpperCase()}</h1></div></div><button onClick={() => setIsSidebarOpen(false)} className="md:hidden p-2 text-gray-400"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button></div>
-               <nav className="space-y-2 flex-1 overflow-y-auto pr-2 scrollbar-hide">
-                    <SidebarBtn icon="⚡" label="Live Orders" active={activeTab === 'orders'} onClick={() => { setActiveTab('orders'); setIsSidebarOpen(false); }} badge={pendingOrders} />
-                    <SidebarBtn icon="💸" label="Expense Mgmt" active={activeTab === 'expenses'} onClick={() => { setActiveTab('expenses'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="🛒" label="Stock Purchases" active={activeTab === 'purchases'} onClick={() => { setActiveTab('purchases'); setIsSidebarOpen(false); }} />    
-                    <SidebarBtn icon="🧑‍🍳" label="Operations & Staff" active={activeTab === 'staff'} onClick={() => { setActiveTab('staff'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="📈" label="Analytics & Txns" active={activeTab === 'analytics'} onClick={() => { setActiveTab('analytics'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="🍔" label="Menu Manager" active={activeTab === 'menu'} onClick={() => { setActiveTab('menu'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="📦" label="Inventory" active={activeTab === 'inventory'} onClick={() => { setActiveTab('inventory'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="📸" label="Moments" active={activeTab === 'moments'} onClick={() => { setActiveTab('moments'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="📊" label="History" active={activeTab === 'history'} onClick={() => { setActiveTab('history'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="👥" label="Users Info" active={activeTab === 'users'} onClick={() => { setActiveTab('users'); setIsSidebarOpen(false); }} />
-                    <SidebarBtn icon="⚙️" label="Settings" active={activeTab === 'settings'} onClick={() => { setActiveTab('settings'); setIsSidebarOpen(false); }} />
+                
+                <nav className="space-y-2 flex-1 overflow-y-auto pr-2 scrollbar-hide">
+                    {/* --- UNLOCKED TABS (Always accessible) --- */}
+                    <SidebarBtn icon="⚡" label="Live Orders" active={activeTab === 'orders'} onClick={() => handleTabClick('orders')} badge={pendingOrders} />
+                    <SidebarBtn icon="🍔" label="Menu Manager" active={activeTab === 'menu'} onClick={() => handleTabClick('menu')} />
+                    <SidebarBtn icon="📊" label="History" active={activeTab === 'history'} onClick={() => handleTabClick('history')} />
+                    
+                    {/* --- LOCKED TABS (Requires PIN if not unlocked) --- */}
+                    <SidebarBtn icon="⏳" label={`Pending Payments ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'pending_payments'} onClick={() => handleTabClick('pending_payments')} badge={pendingPaymentOrdersCount} />
+                    <SidebarBtn icon="💸" label={`Expense Mgmt ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'expenses'} onClick={() => handleTabClick('expenses')} />
+                    <SidebarBtn icon="🛒" label={`Stock Purchases ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'purchases'} onClick={() => handleTabClick('purchases')} />    
+                    <SidebarBtn icon="🧑‍🍳" label={`Operations & Staff ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'staff'} onClick={() => handleTabClick('staff')} />
+                    <SidebarBtn icon="📈" label={`Analytics & Txns ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'analytics'} onClick={() => handleTabClick('analytics')} />
+                    <SidebarBtn icon="❓" label={`Missing Items ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'missing'} onClick={() => handleTabClick('missing')} />
+                    <SidebarBtn icon="📦" label={`Inventory ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'inventory'} onClick={() => handleTabClick('inventory')} />
+                    <SidebarBtn icon="📸" label={`Moments ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'moments'} onClick={() => handleTabClick('moments')} />
+                    <SidebarBtn icon="👥" label={`Users Info ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'users'} onClick={() => handleTabClick('users')} />
+                    <SidebarBtn icon="⚙️" label={`Settings ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'settings'} onClick={() => handleTabClick('settings')} />
                 </nav>
-                <button onClick={onLogout} className="mt-4 flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded-xl transition-all"><span className="text-sm font-bold">Logout</span></button>
-            </aside>
 
+                <button onClick={handleLockApp} className="mt-4 flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded-xl transition-all">
+                    <span className="text-sm font-bold">{isUnlocked ? 'Lock App 🔒' : 'App is Locked 🔒'}</span>
+                </button>
+            </aside> {/* <--- THIS CLOSING TAG FIXES THE ERROR */}
             <div className="flex-1 flex flex-col h-screen overflow-hidden">
                 <header className="md:hidden bg-slate-900 border-b border-white/10 p-4 flex items-center justify-between z-30 sticky top-0">
                     <button onClick={() => setIsSidebarOpen(true)} className="p-2 bg-white/10 rounded-lg">
@@ -3059,101 +3293,111 @@ const handleSaveMissingItem = async (e) => {
                         </div>
                     )}
 
-                   {/* --- TAB: PURCHASES --- */}
-                    {activeTab === 'purchases' && (() => {
-                        // 1. Pre-fill all items from the Database
-                        // 1. Pre-fill ONLY Inventory items from the Database
-                        const groupedPurchases = {};
-                        
-                        inventoryItems.forEach(item => {
-                            groupedPurchases[item.name] = { name: item.name, type: 'Inventory', totalQty: 0, totalSpent: 0 };
-                        });
+                 {activeTab === 'purchases' && (() => {
+                    const groupedPurchases = {};
+                    
+                    // 1. Load items from inventory items list so they always appear
+                    inventoryItems.forEach(item => {
+                        groupedPurchases[item.name] = { 
+                            name: item.name, 
+                            type: item.category || 'Inventory', 
+                            totalQty: item.stock, 
+                            totalSpent: 0 
+                        };
+                    });
 
-                        // 2. Add actual purchase history data (This will add your custom Food ingredients!)
-                        purchasesData.forEach(curr => {
-                            if (!groupedPurchases[curr.item_name]) {
-                                groupedPurchases[curr.item_name] = { name: curr.item_name, type: curr.purchase_type, totalQty: 0, totalSpent: 0 };
-                            }
-                            groupedPurchases[curr.item_name].totalQty += Number(curr.qty);
-                            groupedPurchases[curr.item_name].totalSpent += Number(curr.total_cost);
-                        });
+                    // 2. Aggregate quantities and costs from purchases data
+                    purchasesData.forEach(curr => {
+                        if (!groupedPurchases[curr.item_name]) {
+                            groupedPurchases[curr.item_name] = { 
+                                name: curr.item_name, 
+                                type: curr.purchase_type || 'Inventory', 
+                                totalQty: 0, 
+                                totalSpent: 0 
+                            };
+                        }
+                        groupedPurchases[curr.item_name].totalQty += Number(curr.qty);
+                        groupedPurchases[curr.item_name].totalSpent += Number(curr.total_cost);
+                    });
 
-                       // 3. Convert to array and sort alphabetically A-Z
-                        const groupedPurchasesArray = Object.values(groupedPurchases).sort((a, b) => a.name.localeCompare(b.name));
+                    // 3. Convert to array and sort alphabetically A-Z
+                    const groupedPurchasesArray = Object.values(groupedPurchases).sort((a, b) => a.name.localeCompare(b.name));
 
-                        // 4. Apply Filters & Search
-                        const filteredPurchasesArray = groupedPurchasesArray.filter(item => {
-                            const matchesType = purchaseTabFilter === 'All' || item.type === purchaseTabFilter;
-                            const matchesSearch = item.name.toLowerCase().includes(purchaseSearchQuery.toLowerCase());
-                            return matchesType && matchesSearch;
-                        });
+                    // 4. Filter by the active tab (All, Inventory, Food) and search query
+                    const filteredPurchasesArray = groupedPurchasesArray.filter(item => {
+                        const matchesTab = purchaseTabFilter === 'All' || item.type === purchaseTabFilter;
+                        const matchesSearch = item.name.toLowerCase().includes(purchaseSearchQuery.toLowerCase());
+                        return matchesTab && matchesSearch;
+                    });
 
-                        return (
-                            <div className="max-w-6xl mx-auto pb-10">
-                                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-                                    <div>
-                                        <h2 className="text-2xl font-bold text-green-400">Stock Purchases</h2>
-                                        <p className="text-sm text-gray-400 mt-1">Record items bought. Inventory purchases automatically add to your stock.</p>
-                                    </div>
-                                    <button onClick={() => setPurchaseModal({open: true})} className="bg-green-500 text-black px-6 py-2.5 rounded-xl font-bold shadow-lg hover:bg-green-400 transition whitespace-nowrap">+ Record Purchase</button>
+                    return (
+                        <div className="max-w-6xl mx-auto pb-10">
+                            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                                <div>
+                                    <h2 className="text-2xl font-bold text-green-400">Stock Purchases</h2>
+                                    <p className="text-sm text-gray-400 mt-1">Record items bought. Inventory purchases automatically add to your stock.</p>
                                 </div>
+                                <button onClick={() => setPurchaseModal({open: true})} className="bg-green-500 text-black px-6 py-2.5 rounded-xl font-bold shadow-lg hover:bg-green-400 transition whitespace-nowrap">+ Record Purchase</button>
+                            </div>
 
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-yellow-500">
-                                        <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Food Expenses</p>
-                                        <p className="text-3xl font-black text-white mt-1">₹{purchasesData.filter(p => p.purchase_type === 'Food').reduce((acc, curr) => acc + Number(curr.total_cost), 0)}</p>
-                                    </div>
-                                    <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
-                                        <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Inventory Expenses</p>
-                                        <p className="text-3xl font-black text-white mt-1">₹{purchasesData.filter(p => p.purchase_type === 'Inventory').reduce((acc, curr) => acc + Number(curr.total_cost), 0)}</p>
-                                    </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-yellow-500">
+                                    <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Food Expenses</p>
+                                    <p className="text-3xl font-black text-white mt-1">₹{purchasesData.filter(p => p.purchase_type === 'Food').reduce((acc, curr) => acc + Number(curr.total_cost), 0)}</p>
                                 </div>
-
-                                {/* NEW: FILTERS & SEARCH BAR */}
-                                <div className="flex flex-col md:flex-row gap-4 mb-6 border-b border-white/10 pb-4">
-                                    <div className="flex gap-2">
-                                        {[ 'Food', 'Inventory'].map(f => (
-                                            <button key={f} onClick={() => setPurchaseTabFilter(f)} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${purchaseTabFilter === f ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700'}`}>
-                                                {f === 'All' ? 'All Items' : f}
-                                            </button>
-                                        ))}
-                                    </div>
-                                    <div className="relative flex-1">
-                                        <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">🔍</span>
-                                        <input 
-                                            type="text" 
-                                            placeholder="Search items..." 
-                                            value={purchaseSearchQuery}
-                                            onChange={(e) => setPurchaseSearchQuery(e.target.value)}
-                                            className="w-full bg-slate-800 border border-white/10 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:border-cyan-500 outline-none transition"
-                                        />
-                                        {purchaseSearchQuery && ( <button onClick={() => setPurchaseSearchQuery("")} className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-white">✕</button> )}
-                                    </div>
-                                </div>
-
-                                {/* CARDS GRID */}
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                    {filteredPurchasesArray.map(item => (
-                                        <div key={item.name} onClick={() => setSelectedPurchaseItem(item.name)} className="bg-slate-800 p-5 rounded-xl border border-white/10 hover:border-cyan-500 cursor-pointer shadow-lg transition hover:-translate-y-1 flex flex-col">
-                                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded mb-3 inline-block w-fit ${item.type === 'Food' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400'}`}>{item.type}</span>
-                                            <h3 className="font-bold text-white text-lg truncate mb-2">{item.name}</h3>
-                                            <div className="flex justify-between items-end mt-auto pt-4 border-t border-white/5">
-                                                <div>
-                                                    <p className="text-[10px] text-gray-500 uppercase">Total Qty</p>
-                                                    <p className="font-bold text-white">{item.totalQty}</p>
-                                                </div>
-                                                <div className="text-right">
-                                                    <p className="text-[10px] text-gray-500 uppercase">Total Spent</p>
-                                                    <p className="font-bold text-red-400">₹{item.totalSpent}</p>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    ))}
-                                    {filteredPurchasesArray.length === 0 && <div className="col-span-full text-center py-10 text-gray-500">No items match your search.</div>}
+                                <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
+                                    <p className="text-gray-400 text-sm font-bold uppercase tracking-wider">Total Inventory Expenses</p>
+                                    <p className="text-3xl font-black text-white mt-1">₹{purchasesData.filter(p => p.purchase_type === 'Inventory').reduce((acc, curr) => acc + Number(curr.total_cost), 0)}</p>
                                 </div>
                             </div>
-                        );
-                    })()}
+
+                            {/* FILTERS & SEARCH BAR */}
+                            <div className="flex flex-col md:flex-row gap-4 mb-6 border-b border-white/10 pb-4 items-center justify-between">
+                                <div className="flex gap-2">
+                                    {['All', 'Inventory', 'Food'].map(f => (
+                                        <button key={f} onClick={() => setPurchaseTabFilter(f)} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${purchaseTabFilter === f ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700'}`}>
+                                            {f === 'All' ? 'All Items' : f}
+                                        </button>
+                                    ))}
+                                </div>
+                                <div className="relative flex-1 max-w-md">
+                                    <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">🔍</span>
+                                    <input 
+                                        type="text" 
+                                        placeholder="Search items..." 
+                                        value={purchaseSearchQuery}
+                                        onChange={(e) => setPurchaseSearchQuery(e.target.value)}
+                                        className="w-full bg-slate-800 border border-white/10 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:border-cyan-500 outline-none transition"
+                                    />
+                                    {purchaseSearchQuery && ( <button onClick={() => setPurchaseSearchQuery("")} className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-white">✕</button> )}
+                                </div>
+                            </div>
+
+                            {/* CARDS GRID */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                {filteredPurchasesArray.map(item => (
+                                    <div key={item.name} onClick={() => setSelectedPurchaseItem(item.name)} className="bg-slate-800 p-5 rounded-xl border border-white/10 hover:border-cyan-500 cursor-pointer shadow-lg transition hover:-translate-y-1 flex flex-col">
+                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded mb-3 inline-block w-fit ${item.type === 'Food' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400'}`}>{item.type}</span>
+                                        <h3 className="font-bold text-white text-lg truncate mb-2">{item.name}</h3>
+                                        <div className="flex justify-between items-end mt-auto pt-4 border-t border-white/5">
+                                            <div>
+                                                <p className="text-[10px] text-gray-500 uppercase">Total Qty</p>
+                                                <p className="font-bold text-white">{item.totalQty}</p>
+                                            </div>
+                                            <div className="text-right">
+                                                <p className="text-[10px] text-gray-500 uppercase">Total Spent</p>
+                                                <p className="font-bold text-red-400">₹{item.totalSpent}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                                {filteredPurchasesArray.length === 0 && <div className="col-span-full text-center py-10 text-gray-500">No items match your search.</div>}
+                            </div>
+                        </div>
+                    );
+                })()}
+
+                       
 
                {/* --- TAB: STAFF & OPERATIONS (MERGED) --- */}
                     {activeTab === 'staff' && (
@@ -3340,124 +3584,147 @@ const handleSaveMissingItem = async (e) => {
                         </div>
                     )}
 
-             {/* --- TAB: INVENTORY MANAGER --- */}
-                {activeTab === 'inventory' && (
-                    <div className="max-w-7xl mx-auto pb-10">
-                        
-                        {/* --- WHATSAPP LOW STOCK DISPATCHER CARD (ONLY ON INVENTORY PAGE) --- */}
-                        <div className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-l-4 border-l-green-500">
-                            <div className="space-y-1">
-                                <div className="flex items-center gap-2">
-                                    <span className="text-xl">💬</span>
-                                    <h3 className="font-bold text-white text-base">WhatsApp Low Stock Dispatcher</h3>
-                                </div>
-                                <p className="text-xs text-gray-400">
-                                    Low Stock Items (<span className="text-yellow-400 font-bold">≤5 qty</span>): {' '}
-                                    <span className="text-white font-bold">
-                                        {inventoryItems.filter(i => i.stock <= 5).length > 0 
-                                            ? inventoryItems.filter(i => i.stock <= 5).map(i => `${i.name} (${i.stock})`).join(', ') 
-                                            : 'All items well-stocked! 🎉'}
-                                    </span>
-                                </p>
-                            </div>
+             
 
-                            <div className="flex items-center gap-3 w-full md:w-auto">
-                                {isEditingWa ? (
-                                    <div className="flex gap-2 w-full md:w-auto">
-                                        <input 
-                                            type="text" 
-                                            placeholder="e.g. 919876543210" 
-                                            value={personalWaNumber} 
-                                            onChange={(e) => setPersonalWaNumber(e.target.value)}
-                                            className="bg-black/50 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-green-500"
-                                        />
-                                        <button onClick={() => { localStorage.setItem('personal_wa_number', personalWaNumber); setIsEditingWa(false); }} className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold">Save</button>
-                                    </div>
-                                ) : (
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-xs text-gray-400">To: <strong className="text-white">{personalWaNumber || 'No number set'}</strong></span>
-                                        <button onClick={() => setIsEditingWa(true)} className="text-xs text-cyan-400 underline hover:text-cyan-300">Edit</button>
-                                    </div>
-                                )}
+                        {/* --- TAB: INVENTORY MANAGER --- */}
+{activeTab === 'inventory' && (
+    <div className="max-w-7xl mx-auto pb-10">
+        
+        {/* --- WHATSAPP LOW STOCK DISPATCHER CARD --- */}
+        <div className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-l-4 border-l-green-500">
+            <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                    <span className="text-xl">💬</span>
+                    <h3 className="font-bold text-white text-base">WhatsApp Low Stock Dispatcher</h3>
+                </div>
+                <p className="text-xs text-gray-400">
+                    Low Stock Items (<span className="text-yellow-400 font-bold">≤5 qty</span>): {' '}
+                    <span className="text-white font-bold">
+                        {inventoryItems.filter(i => i.stock <= 5).length > 0 
+                            ? inventoryItems.filter(i => i.stock <= 5).map(i => `${i.name} (${i.stock})`).join(', ') 
+                            : 'All items well-stocked! 🎉'}
+                    </span>
+                </p>
+            </div>
 
-                                <button 
-                                    onClick={() => {
-                                        if (!personalWaNumber) {
-                                            alert("Please set your personal WhatsApp number first!");
-                                            setIsEditingWa(true);
-                                            return;
-                                        }
-                                        const lowItems = inventoryItems.filter(i => i.stock <= 5);
-                                        if (lowItems.length === 0) {
-                                            alert("No low stock items to report right now!");
-                                            return;
-                                        }
-                                        let msg = "🚨 *HOTEL INVENTORY REFILL ALERT* 🚨\n\nThe following items are running low and need to be refilled:\n\n";
-                                        lowItems.forEach(i => {
-                                            msg += `• *${i.name}* - Left: *${i.stock}* units\n`;
-                                        });
-                                        msg += "\nPlease arrange stock updates accordingly.";
-                                        
-                                        const url = `https://wa.me/${personalWaNumber}?text=${encodeURIComponent(msg)}`;
-                                        window.open(url, '_blank');
-                                    }}
-                                    className="bg-green-600 hover:bg-green-500 text-white px-5 py-2.5 rounded-xl font-bold text-xs transition shadow-lg whitespace-nowrap flex items-center gap-2"
-                                >
-                                    <span>📲 Send WhatsApp Alert</span>
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Inventory Header & Controls */}
-                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-                            <h2 className="text-2xl font-bold">Inventory Manager</h2>
-                            <button onClick={() => setInvModal({open: true, mode: 'add', data: null})} className="bg-cyan-500 text-black px-4 py-2 rounded-xl font-bold hover:bg-cyan-400 transition">+ Add Item</button>
-                        </div>
-                        
-                        <div className="mb-6">
-                            <input 
-                                type="text" 
-                                placeholder="Search inventory items or barcodes..." 
-                                value={inventorySearchQuery} 
-                                onChange={(e) => setInventorySearchQuery(e.target.value)} 
-                                className="w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-cyan-500 outline-none" 
-                            />
-                        </div>
-
-                        <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
-                            <table className="w-full text-left text-sm text-gray-400 min-w-[700px]">
-                                <thead className="bg-black/30 text-white uppercase text-xs">
-                                    <tr>
-                                        <th className="p-4">Item Name</th>
-                                        <th className="p-4">Barcode / SKU</th>
-                                        <th className="p-4 text-center">Stock</th>
-                                        <th className="p-4 text-right">Price</th>
-                                        <th className="p-4 text-center">Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {filteredInventory.map(item => (
-                                        <tr key={item.id} className="border-b border-white/5 hover:bg-white/5">
-                                            <td className="p-4 font-bold text-white">{item.name}</td>
-                                            <td className="p-4 font-mono text-xs text-gray-500">{item.barcode}</td>
-                                            <td className="p-4 text-center">
-                                                <span className={`px-2 py-1 rounded text-xs font-bold ${item.stock <= 5 ? 'bg-red-500/20 text-red-400 animate-pulse' : 'bg-green-500/20 text-green-400'}`}>
-                                                    {item.stock} units
-                                                </span>
-                                            </td>
-                                            <td className="p-4 text-right font-mono text-cyan-400">₹{item.price}</td>
-                                            <td className="p-4 text-center flex justify-center gap-2">
-                                                <button onClick={() => setInvModal({open: true, mode: 'edit', data: item})} className="bg-blue-500/20 text-blue-400 p-2 rounded hover:bg-blue-500 hover:text-white transition">✏️</button>
-                                                <button onClick={() => deleteInventoryItem(item.id)} className="bg-red-500/20 text-red-400 p-2 rounded hover:bg-red-500 hover:text-white transition">🗑</button>
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                            {filteredInventory.length === 0 && <div className="text-center py-10 text-gray-500">No inventory items found.</div>}
-                        </div>
+            <div className="flex items-center gap-3 w-full md:w-auto">
+                {isEditingWa ? (
+                    <div className="flex gap-2 w-full md:w-auto">
+                        <input 
+                            type="text" 
+                            placeholder="e.g. 919876543210" 
+                            value={personalWaNumber} 
+                            onChange={(e) => setPersonalWaNumber(e.target.value)}
+                            className="bg-black/50 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-green-500"
+                        />
+                        <button onClick={() => { localStorage.setItem('personal_wa_number', personalWaNumber); setIsEditingWa(false); }} className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold">Save</button>
+                    </div>
+                ) : (
+                    <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400">To: <strong className="text-white">{personalWaNumber || 'No number set'}</strong></span>
+                        <button onClick={() => setIsEditingWa(true)} className="text-xs text-cyan-400 underline hover:text-cyan-300">Edit</button>
                     </div>
                 )}
+
+                <button 
+                    onClick={() => {
+                        if (!personalWaNumber) {
+                            alert("Please set your personal WhatsApp number first!");
+                            setIsEditingWa(true);
+                            return;
+                        }
+                        const lowItems = inventoryItems.filter(i => i.stock <= 5);
+                        if (lowItems.length === 0) {
+                            alert("No low stock items to report right now!");
+                            return;
+                        }
+                        let msg = "🚨 *HOTEL INVENTORY REFILL ALERT* 🚨\n\nThe following items are running low and need to be refilled:\n\n";
+                        lowItems.forEach(i => {
+                            msg += `• *${i.name}* - Left: *${i.stock}* units\n`;
+                        });
+                        msg += "\nPlease arrange stock updates accordingly.";
+                        
+                        const url = `https://wa.me/${personalWaNumber}?text=${encodeURIComponent(msg)}`;
+                        window.open(url, '_blank');
+                    }}
+                    className="bg-green-600 hover:bg-green-500 text-white px-5 py-2.5 rounded-xl font-bold text-xs transition shadow-lg whitespace-nowrap flex items-center gap-2"
+                >
+                    <span>📲 Send WhatsApp Alert</span>
+                </button>
+            </div>
+        </div>
+
+        {/* Inventory Header & Controls */}
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+            <h2 className="text-2xl font-bold">Inventory Manager</h2>
+            <button onClick={() => setInvModal({open: true, mode: 'add', data: null})} className="bg-cyan-500 text-black px-4 py-2 rounded-xl font-bold hover:bg-cyan-400 transition">+ Add Item</button>
+        </div>
+        
+        {/* --- CATEGORY FILTER TABS (All, Inventory, Food) & SEARCH --- */}
+        <div className="flex flex-col md:flex-row gap-4 mb-6 items-center justify-between">
+            <div className="flex gap-2 w-full md:w-auto">
+                {['All', 'Inventory', 'Food'].map(cat => (
+                    <button 
+                        key={cat} 
+                        onClick={() => setInventoryCategoryFilter(cat)} 
+                        className={`px-6 py-2 rounded-lg text-sm font-bold transition ${inventoryCategoryFilter === cat ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700'}`}
+                    >
+                        {cat === 'All' ? 'All Items' : cat}
+                    </button>
+                ))}
+            </div>
+
+            <div className="w-full md:w-72">
+                <input 
+                    type="text" 
+                    placeholder="Search inventory items or barcodes..." 
+                    value={inventorySearchQuery} 
+                    onChange={(e) => setInventorySearchQuery(e.target.value)} 
+                    className="w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none" 
+                />
+            </div>
+        </div>
+
+        <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
+            <table className="w-full text-left text-sm text-gray-400 min-w-[700px]">
+                <thead className="bg-black/30 text-white uppercase text-xs">
+                    <tr>
+                        <th className="p-4">Item Name</th>
+                        <th className="p-4">Category</th>
+                        <th className="p-4">Barcode / SKU</th>
+                        <th className="p-4 text-center">Stock</th>
+                        <th className="p-4 text-right">Price</th>
+                        <th className="p-4 text-center">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {filteredInventory.map(item => (
+                        <tr key={item.id} className="border-b border-white/5 hover:bg-white/5">
+                            <td className="p-4 font-bold text-white">{item.name}</td>
+                            <td className="p-4">
+                                <span className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase ${item.category === 'Food' ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'}`}>
+                                    {item.category || 'Inventory'}
+                                </span>
+                            </td>
+                            <td className="p-4 font-mono text-xs text-gray-500">{item.barcode || '-'}</td>
+                            <td className="p-4 text-center">
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${item.stock <= 5 ? 'bg-red-500/20 text-red-400 animate-pulse' : 'bg-green-500/20 text-green-400'}`}>
+                                    {item.stock} units
+                                </span>
+                            </td>
+                            <td className="p-4 text-right font-mono text-cyan-400">₹{item.price}</td>
+                            <td className="p-4 text-center flex justify-center gap-2">
+                                <button onClick={() => setInvModal({open: true, mode: 'edit', data: item})} className="bg-blue-500/20 text-blue-400 p-2 rounded hover:bg-blue-500 hover:text-white transition" title="Edit Item">✏️</button>
+                                <button onClick={() => deleteInventoryItem(item.id)} className="bg-red-500/20 text-red-400 p-2 rounded hover:bg-red-500 hover:text-white transition" title="Delete Item">🗑</button>
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            {filteredInventory.length === 0 && <div className="text-center py-10 text-gray-500">No inventory items found.</div>}
+        </div>
+    </div>
+)}
                 
                     {/* TAB: LIVE ORDERS */}
                     {activeTab === 'orders' && ( 
@@ -4112,33 +4379,43 @@ const handleSaveMissingItem = async (e) => {
                                 </div>
                             </div>
 
-                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg">
-                                <h3 className="text-xl font-bold mb-2">Change Admin PIN</h3>
-                                <p className="text-sm text-gray-400 mb-4">Update the 4-digit code required to unlock this dashboard.</p>
-                                <form onSubmit={(e) => {
-                                    e.preventDefault();
-                                    const currentPin = localStorage.getItem('valo_admin_pin') || '1234';
-                                    const oldPin = e.target.oldPin.value;
-                                    const newPin = e.target.newPin.value;
-                                    
-                                    if(oldPin !== currentPin) {
-                                        alert("Old PIN is incorrect!");
-                                        return;
-                                    }
-                                    if(newPin.length < 4) {
-                                        alert("New PIN must be exactly 4 digits.");
-                                        return;
-                                    }
-                                    
-                                    localStorage.setItem('valo_admin_pin', newPin);
-                                    alert("Admin PIN successfully changed!");
-                                    e.target.reset();
-                                }} className="space-y-4 max-w-sm">
-                                    <input name="oldPin" type="password" placeholder="Current PIN" maxLength="4" autoComplete="new-password" required className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white tracking-widest text-center focus:border-cyan-500 outline-none transition" />
-                                    <input name="newPin" type="password" placeholder="New PIN" maxLength="4" autoComplete="new-password" required className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white tracking-widest text-center focus:border-cyan-500 outline-none transition" />
-                                    <button type="submit" className="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6 py-3 rounded-lg shadow-lg shadow-cyan-500/20 transition">Update PIN</button>
-                                </form>
-                            </div>
+                           <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg">
+    <h3 className="text-xl font-bold mb-2">Change Admin PIN</h3>
+    <p className="text-sm text-gray-400 mb-4">Update the 4-digit code required to unlock this dashboard globally across all devices.</p>
+    <form onSubmit={async (e) => {
+        e.preventDefault();
+        
+        // 1. Fetch current PIN from Database to verify old PIN
+        const { data: dbData } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
+        const currentPin = dbData ? dbData.admin_pin : '6748';
+        
+        const oldPin = e.target.oldPin.value;
+        const newPin = e.target.newPin.value;
+        
+        if(oldPin !== currentPin) {
+            alert("Old PIN is incorrect!");
+            return;
+        }
+        if(newPin.length < 4) {
+            alert("New PIN must be exactly 4 digits.");
+            return;
+        }
+        
+        // 2. Save the New PIN to the Database permanently
+        const { error } = await supabase.from('app_settings').update({ admin_pin: newPin }).eq('id', 1);
+        
+        if (error) {
+            alert("Error updating database: " + error.message);
+        } else {
+            alert("Admin PIN successfully synced to Database!");
+            e.target.reset();
+        }
+    }} className="space-y-4 max-w-sm">
+        <input name="oldPin" type="password" placeholder="Current PIN" maxLength="4" autoComplete="new-password" required className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white tracking-widest text-center focus:border-cyan-500 outline-none transition" />
+        <input name="newPin" type="password" placeholder="New PIN" maxLength="4" autoComplete="new-password" required className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white tracking-widest text-center focus:border-cyan-500 outline-none transition" />
+        <button type="submit" className="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6 py-3 rounded-lg shadow-lg shadow-cyan-500/20 transition">Update Global PIN</button>
+    </form>
+</div>
                         </div>
                     )}
                 </main>

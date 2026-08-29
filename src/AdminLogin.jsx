@@ -7,7 +7,7 @@ export default function AdminLogin({ onLogin }) {
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const currentPin = localStorage.getItem('valo_admin_pin') || '1234';
+        const currentPin = localStorage.getItem('valo_admin_pin') || '6748';
         if (pin === currentPin) {
             localStorage.setItem('valo_admin_auth', 'true');
             onLogin();
