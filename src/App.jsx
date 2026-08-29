@@ -148,7 +148,7 @@ export default function AdminPanel() {
 }
 // --- SPLASH SCREEN ---
 function SplashScreen() {
-    const logoUrl = '/splash.png'; 
+    const logoUrl = '/logo.png'; 
     return (
         <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center overflow-hidden relative">
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-cyan-500/10 rounded-full blur-[120px] animate-pulse"></div>
@@ -169,7 +169,7 @@ function AdminLogin({ onAccess }) {
     const [pin, setPin] = useState("");
     const [error, setError] = useState(false);
     const [isVerifying, setIsVerifying] = useState(false);
-    const logoUrl = '/splash.png';
+    const logoUrl = '/logo.png';
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -191,7 +191,7 @@ function AdminLogin({ onAccess }) {
     return (
         <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-4">
             <div className={`w-full max-w-sm bg-slate-800 border border-white/10 p-10 rounded-[3rem] shadow-2xl text-center transition-all ${error ? 'animate-shake border-red-500' : ''}`}>
-                <div className="w-28 h-28 bg-white rounded-3xl mx-auto flex items-center justify-center mb-8 shadow-xl border border-white/5 relative">
+                <div className="w-28 h-28 bg-white  rounded-3xl mx-auto flex items-center justify-center mb-8 shadow-xl border border-white/5 relative">
                      <img src={logoUrl} alt="Logo" className="w-28 h-28 object-contain" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.style.display = 'none'; }} />
                 </div>
                 <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">Access Locked</h2>
