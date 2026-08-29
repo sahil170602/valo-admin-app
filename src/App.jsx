@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { Capacitor } from '@capacitor/core';
+import OneSignal from 'onesignal-cordova-plugin';
 import { Filesystem } from '@capacitor/filesystem';
 
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
@@ -83,25 +84,21 @@ export default function AdminPanel() {
 
     useEffect(() => {
         const setupPermissions = async () => {
-            // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
-            if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-                
-                // A. Request Storage Permissions on Load
-                try {
-                    await Filesystem.requestPermissions();
-                    console.log("Storage permissions handled.");
-                } catch (e) {
-                    console.log("Storage permission error:", e);
-                }
-
-                // B. Request Push Notifications
-                if (window.plugins && window.plugins.OneSignal) {
-                    window.plugins.OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
-                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
-                        console.log("User accepted notifications: " + accepted);
-                    });
-                }
-            } 
+          // --- 1. NATIVE ANDROID SETUP (CAPACITOR) ---
+if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+    // V5+ Version check
+    if (OneSignal.initialize) {
+        OneSignal.initialize("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+        OneSignal.Notifications.requestPermission(true);
+    } 
+    // V3/V4 Version check
+    else if (OneSignal.setAppId) {
+        OneSignal.setAppId("3a997ca5-9d8f-4e81-8943-907b81b9a577");
+        OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
+            console.log("User accepted notifications: " + accepted);
+        });
+    }
+}
             // --- 2. WEB BROWSER & WINDOWS EXE SETUP ---
             else {
                 if (window.OneSignalInitialized) return; 
@@ -3086,27 +3083,31 @@ const handleSaveMissingItem = async (e) => {
                     
                     <div className="flex items-center">
                         <button 
-    onClick={() => {
-        // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
-        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-            if (window.plugins && window.plugins.OneSignal) {
-                window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
-                    alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                });
-            }
-        } 
-        // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
-        else {
-            window.OneSignalDeferred = window.OneSignalDeferred || [];
-            window.OneSignalDeferred.push(async function(OneSignal) {
-                try {
-                    await OneSignal.Slidedown.promptPush();
-                } catch (err) {
-                    console.log("Push prompt error:", err);
-                }
+   onClick={() => {
+    // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
+    if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
+        if (OneSignal.Notifications) {
+            OneSignal.Notifications.requestPermission(true).then((accepted) => {
+                alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+            });
+        } else if (OneSignal.promptForPushNotificationsWithUserResponse) {
+            OneSignal.promptForPushNotificationsWithUserResponse((accepted) => {
+                alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
             });
         }
-    }} 
+    } 
+    // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
+    else {
+        window.OneSignalDeferred = window.OneSignalDeferred || [];
+        window.OneSignalDeferred.push(async function(OneSignalWeb) {
+            try {
+                await OneSignalWeb.Slidedown.promptPush();
+            } catch (err) {
+                console.log("Push prompt error:", err);
+            }
+        });
+    }
+}}
     className="p-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500 hover:text-black transition"
     title="Enable Notifications"
 >
