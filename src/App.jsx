@@ -4371,13 +4371,23 @@ const handleSaveMissingItem = async (e) => {
                                 <h3 className="text-xl font-bold mb-2 text-white">Push Notifications</h3>
                                 <p className="text-sm text-gray-400 mb-4">Enable lock-screen notifications for new orders on this device.</p>
                                 <button 
+    
     onClick={() => {
         // --- 1. NATIVE ANDROID/IOS CAPACITOR PUSH PROMPT ---
         if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
             if (window.plugins && window.plugins.OneSignal) {
-                window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
-                    alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
-                });
+                // OneSignal v5+ Syntax
+                if (window.plugins.OneSignal.Notifications) {
+                    window.plugins.OneSignal.Notifications.requestPermission(true).then((accepted) => {
+                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+                    });
+                } 
+                // Fallback
+                else if (window.plugins.OneSignal.promptForPushNotificationsWithUserResponse) {
+                    window.plugins.OneSignal.promptForPushNotificationsWithUserResponse(function(accepted) {
+                        alert(accepted ? "Notifications enabled successfully!" : "Permission denied.");
+                    });
+                }
             }
         } 
         // --- 2. WEB BROWSER & WINDOWS EXE PROMPT ---
