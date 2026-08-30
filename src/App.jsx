@@ -5,7 +5,7 @@ import { Capacitor } from '@capacitor/core';
 import { App } from '@capacitor/app';
 import OneSignal from '@onesignal/capacitor-plugin';
 import { Filesystem } from '@capacitor/filesystem';
-
+import RoomManagement from './RoomManagement';
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
 const getFormattedDate = (dateObj = new Date()) => {
     const d = String(dateObj.getDate()).padStart(2, '0');
@@ -118,7 +118,15 @@ const sendAdminNotification = async (title, body) => {
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
     const [showGate, setShowGate] = useState(true);
+    
+    // --- MODE SWITCH STATE ---
+    const [appMode, setAppMode] = useState(() => localStorage.getItem('valo_app_mode') || 'food');
 
+    const toggleMode = () => {
+        const newMode = appMode === 'food' ? 'room' : 'food';
+        setAppMode(newMode);
+        localStorage.setItem('valo_app_mode', newMode);
+    };
    useEffect(() => {
         let foregroundListener = null;
         let clickListener = null;
@@ -208,19 +216,24 @@ export default function AdminPanel() {
         return () => clearTimeout(timer);
     }, []);
 
-    const handleAccess = (isUnlocked) => {
+   const handleAccess = (isUnlocked) => {
         if (isUnlocked) {
             localStorage.setItem('valo_unlocked', 'true');
         } else {
-            localStorage.setItem('valo_unlocked', 'false'); // Staff mode
+            localStorage.setItem('valo_unlocked', 'false');
         }
-        setShowGate(false); // Move to dashboard
+        setShowGate(false);
     };
 
     if (isLoading) return <SplashScreen />;
     if (showGate) return <AdminLogin onAccess={handleAccess} />;
 
-    return <AdminDashboard />;
+    // Pass the state and toggle function down to the dashboards
+    return appMode === 'food' ? (
+        <AdminDashboard appMode={appMode} toggleMode={toggleMode} />
+    ) : (
+        <RoomManagement appMode={appMode} toggleMode={toggleMode} />
+    );
 }
 // --- SPLASH SCREEN ---
 function SplashScreen() {
@@ -287,9 +300,9 @@ function AdminLogin({ onAccess }) {
         </div>
     );
 }
-function AdminDashboard() {
-    const [activeTab, setActiveTab] = useState('orders'); 
-    const [opsTab, setOpsTab] = useState('staff');
+function AdminDashboard({ appMode, toggleMode }) {
+    const [activeTab, setActiveTab] = useState('orders');
+     const [opsTab, setOpsTab] = useState('staff');
     
     // --- TAB-LEVEL SECURITY STATES ---
     const [isUnlocked, setIsUnlocked] = useState(() => localStorage.getItem('valo_unlocked') === 'true');
@@ -3336,9 +3349,28 @@ const handleCreateBill = async () => {
 
           {/* SIDEBAR */}
             {isSidebarOpen && (<div onClick={() => setIsSidebarOpen(false)} className="fixed inset-0 bg-black/80 z-40 md:hidden backdrop-blur-sm animate-fade-in"></div>)}
-            <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 border-r border-white/10 p-6 flex flex-col transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}`}>
-                <div className="flex justify-between items-center mb-10"><div className="flex items-center gap-3"><div className="w-10 h-10 bg-cyan-500 rounded-lg flex items-center justify-center font-bold text-black text-xl">{appName.charAt(0).toUpperCase()}</div><div><h1 className="text-md font-bold font-serif tracking-wide">{appName.toUpperCase()}</h1></div></div><button onClick={() => setIsSidebarOpen(false)} className="md:hidden p-2 text-gray-400"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button></div>
-                
+           <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 border-r border-white/10 p-6 flex flex-col transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}`}>
+                <div className="flex justify-between items-center mb-10">
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-cyan-500 rounded-lg flex items-center justify-center font-bold text-black text-xl">{appName.charAt(0).toUpperCase()}</div>
+                        <div><h1 className="text-md font-bold font-serif tracking-wide">{appName.toUpperCase()}</h1></div>
+                    </div>
+                    
+                    {/* --- DESKTOP TOGGLE SWITCH --- */}
+                    <div 
+                        onClick={toggleMode}
+                        className={`hidden md:flex w-14 h-7 items-center rounded-full p-1 cursor-pointer transition-colors duration-300 ${appMode === 'food' ? 'bg-cyan-500/20 border border-cyan-500/50' : 'bg-yellow-500/20 border border-yellow-500/50'}`}
+                        title="Switch to Room Mode"
+                    >
+                        <div className={`w-5 h-5 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center text-[10px] ${appMode === 'food' ? 'translate-x-0 bg-cyan-500' : 'translate-x-7 bg-yellow-500'}`}>
+                            {appMode === 'food' ? '🍔' : '🏨'}
+                        </div>
+                    </div>
+
+                    <button onClick={() => setIsSidebarOpen(false)} className="md:hidden p-2 text-gray-400">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                </div>
                 <nav className="space-y-2 flex-1 overflow-y-auto pr-2 scrollbar-hide">
                     {/* --- UNLOCKED TABS (Always accessible) --- */}
                     <SidebarBtn icon="⚡" label="Live Orders" active={activeTab === 'orders'} onClick={() => handleTabClick('orders')} badge={pendingOrders} />
@@ -3360,7 +3392,7 @@ const handleCreateBill = async () => {
                     <span className="text-sm font-bold">{isUnlocked ? 'Lock App 🔒' : 'App is Locked 🔒'}</span>
                 </button>
             </aside> {/* <--- THIS CLOSING TAG FIXES THE ERROR */}
-            <div className="flex-1 flex flex-col h-screen overflow-hidden">
+           <div className="flex-1 flex flex-col h-screen overflow-hidden">
                 <header className="md:hidden bg-slate-900 border-b border-white/10 p-4 flex items-center justify-between z-30 sticky top-0">
                     <button onClick={() => setIsSidebarOpen(true)} className="p-2 bg-white/10 rounded-lg">
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
@@ -3368,7 +3400,17 @@ const handleCreateBill = async () => {
                     <span className="font-bold text-[22px] text-cyan-400 tracking-wide">{appName}</span>
                     
                     <div className="flex items-center">
-                        <button
+                        
+                        {/* --- MOBILE TOGGLE SWITCH (BEFORE NOTIFICATION BELL) --- */}
+                        <div 
+                            onClick={toggleMode}
+                            className={`w-14 h-7 flex items-center rounded-full p-1 cursor-pointer transition-colors duration-300 mr-3 ${appMode === 'food' ? 'bg-cyan-500/20 border border-cyan-500/50' : 'bg-yellow-500/20 border border-yellow-500/50'}`}
+                        >
+                            <div className={`w-5 h-5 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center text-[10px] ${appMode === 'food' ? 'translate-x-0 bg-cyan-500' : 'translate-x-7 bg-yellow-500'}`}>
+                                {appMode === 'food' ? '🍔' : '🏨'}
+                            </div>
+                        </div>
+                         <button
 onClick={async () => {
     try {
         if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
