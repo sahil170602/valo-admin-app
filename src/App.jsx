@@ -1320,6 +1320,9 @@ const handleSaveMissingItem = async (e) => {
             items: updatedRegularItems,
             total: newTotal 
         });
+
+        // --- ADD THIS NOTIFICATION ---
+        sendAdminNotification("🔄 Order Quantity Updated", `Order #${order.id} quantities were modified.`);
     };
 
     const removeLiveOrderItem = async (orderId, itemKey, isCustom) => {
@@ -1357,12 +1360,15 @@ const handleSaveMissingItem = async (e) => {
         const updatedStatuses = { ...(order.itemStatuses || {}) };
         delete updatedStatuses[itemKey];
 
-        await updateOrder(orderId, { 
+       await updateOrder(orderId, { 
             customItems: updatedCustomItems, 
             items: updatedRegularItems,
             itemStatuses: updatedStatuses,
             total: newTotal 
         });
+
+        // --- ADD THIS NOTIFICATION ---
+        sendAdminNotification("🗑️ Item Removed", `An item was removed from Order #${order.id}.`);
     };
 
     const handleAddCustomItem = async (orderId) => {
@@ -1419,6 +1425,9 @@ const handleSaveMissingItem = async (e) => {
             items: updatedRegularItems,
             total: newTotal 
         });
+
+        // --- ADD THIS NOTIFICATION ---
+        sendAdminNotification("✏️ Order Updated", `Item added to Order #${order.id} (Table: ${order.tableNo})`);
         
         setAddingItemTo(null);
         setCustomItemForm({ name: '', qty: 1, price: '', menuId: null, invId: null, isInv: false });
