@@ -89,6 +89,32 @@ const showWebNotification = (title, body) => {
     }
 };
 
+const sendAdminNotification = async (title, body) => {
+    try {
+        // Android APK - OneSignal
+        if (Capacitor.isNativePlatform()) {
+            const nativeApi =
+                OneSignal ||
+                (window.plugins && window.plugins.OneSignal);
+
+            if (nativeApi?.Notifications?.requestPermission) {
+                await nativeApi.Notifications.requestPermission(true);
+            }
+
+            // IMPORTANT:
+            // The Admin app receives pushes from OneSignal.
+            // This function is only used for local/admin-side notifications.
+            console.log('Admin notification:', title, body);
+        }
+
+        // Web/PWA notification
+        showWebNotification(title, body);
+
+    } catch (err) {
+        console.error('Admin notification error:', err);
+    }
+};
+
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
     const [showGate, setShowGate] = useState(true);
@@ -1500,13 +1526,18 @@ const handleCreateBill = async () => {
                     item_names: generateItemNamesString(mergedRegularItems, mergedCustomItems)
                 }).eq('id', dbOrder.id);
 
-                if (error) alert("Error merging bill.");
-               else {
-    alert(`Successfully merged into active Order #${dbOrder.id}`);
-    resetPOS();
-    setActiveTab('orders');
-    fetchData();
-}
+                if (error) {
+                    alert("Error merging bill.");
+                } else {
+                    alert(`Successfully merged into active Order #${dbOrder.id}`);
+                    
+                    // --- TRIGGER NOTIFICATION ---
+                    sendAdminNotification("🛒 Order Updated/Merged", `Bill merged into Active Order #${dbOrder.id} (₹${mergedTotal})`);
+                    
+                    resetPOS();
+                    setActiveTab('orders');
+                    fetchData();
+                }
             }
         } else {
             const orderPayload = {
@@ -1516,7 +1547,7 @@ const handleCreateBill = async () => {
                 customer_phone: billCustomerPhone || 'Walk-in',
                 item_names: generateItemNamesString(regularItems, customItems),
                 order_details: {
-                    date: getFormattedDate(), // ALWAYS DD/MM/YYYY
+                    date: getFormattedDate(), 
                     time: getFormattedTime(),
                     timestamp: Date.now(),
                     items: regularItems,
@@ -1528,18 +1559,22 @@ const handleCreateBill = async () => {
                 }
             };
 
-           const { data, error } = await supabase
-    .from('orders')
-    .insert([orderPayload])
-    .select();
+            const { data, error } = await supabase
+                .from('orders')
+                .insert([orderPayload])
+                .select();
 
-if (error) {
-    alert("Error creating bill.");
-} else {
-    resetPOS();
-    setActiveTab('orders');
-    fetchData();
-}
+            if (error) {
+                alert("Error creating bill.");
+            } else {
+                // --- TRIGGER NOTIFICATION ---
+                const newId = data?.[0]?.id || 'New';
+                sendAdminNotification("📦 New Bill Created", `Order #${newId} created for Table: ${billTableNo || 'Counter'} (₹${addedTotal})`);
+
+                resetPOS();
+                setActiveTab('orders');
+                fetchData();
+            }
         }
     };
 
@@ -4162,9 +4197,13 @@ onClick={async () => {
                                             
                                             {order.status === 'Preparing' && <button onClick={() => updateOrder(order.id, {status: 'Ready'})} className="bg-green-600 px-6 py-3 rounded-lg font-bold flex-1">Ready</button>}
                                             
-                                           {order.status === 'Ready' && (
+                                          {order.status === 'Ready' && (
     <button 
-        onClick={() => updateOrder(order.id, {status: 'Picked Up'})} 
+        onClick={() => {
+            updateOrder(order.id, {status: 'Picked Up'});
+            // --- TRIGGER NOTIFICATION ---
+            sendAdminNotification("✅ Order Completed", `Order #${order.displayId || order.id} has been picked up/completed.`);
+        }} 
         className={`px-6 py-3 rounded-lg font-bold flex-1 transition-all ${
             order.paymentStatus === 'Paid' 
                 ? 'bg-slate-600 hover:bg-slate-500 text-white shadow-lg' 
@@ -4173,6 +4212,7 @@ onClick={async () => {
     >
         {order.paymentStatus === 'Paid' ? 'Complete' : 'Complete (Pending)'}
     </button>
+
 )}
 
                                             {(order.paymentStatus === 'Pending' || !order.paymentStatus) && ( 
