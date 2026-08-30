@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { Capacitor } from '@capacitor/core';
+import { App } from '@capacitor/app';
 import OneSignal from '@onesignal/capacitor-plugin';
 import { Filesystem } from '@capacitor/filesystem';
 
@@ -398,11 +399,193 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
     const [drawerTakenOut, setDrawerTakenOut] = useState('');
     const [drawerTakenBy, setDrawerTakenBy] = useState('');
 
-    const [selectedTableFilter, setSelectedTableFilter] = useState('All');
-    const audioRef = useRef(null);
+  const [selectedTableFilter, setSelectedTableFilter] = useState('All'); 
+const audioRef = useRef(null);
 
-   // --- SMART LOW STOCK NOTIFICATION ENGINE ---
-    const prevInvRef = useRef({});
+// --- SMART LOW STOCK NOTIFICATION ENGINE ---
+const prevInvRef = useRef({});
+
+
+// ============================================================
+// ANDROID BACK BUTTON NAVIGATION
+// ============================================================
+useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    let backListener;
+
+    const setupBackButton = async () => {
+        backListener = await App.addListener('backButton', () => {
+
+            // 1. CLOSE CREATE BILL MODAL
+            if (createBillModal) {
+                setCreateBillModal(false);
+                return;
+            }
+
+            // 2. CLOSE ORDER DETAILS
+            if (viewOrderDetails) {
+                setViewOrderDetails(null);
+                return;
+            }
+
+            // 3. CLOSE EDIT HISTORY MODAL
+            if (editHistoryModal.open) {
+                setEditHistoryModal({
+                    open: false,
+                    order: null,
+                    tempMethod: 'Cash'
+                });
+                return;
+            }
+
+            // 4. CLOSE PAYMENT MODAL
+            if (adminPaymentModal.open) {
+                setAdminPaymentModal({
+                    open: false,
+                    orderId: null,
+                    total: null
+                });
+                setIsSplitMode(false);
+                return;
+            }
+
+            // 5. CLOSE ITEM MODAL
+            if (itemModal.open) {
+                setItemModal({
+                    open: false,
+                    mode: 'add',
+                    data: null
+                });
+                return;
+            }
+
+            // 6. CLOSE CATEGORY MODAL
+            if (catModal) {
+                setCatModal(false);
+                return;
+            }
+
+            // 7. CLOSE MOMENT MODAL
+            if (momentModal.open) {
+                setMomentModal({
+                    open: false,
+                    mode: 'add',
+                    data: null
+                });
+                return;
+            }
+
+            // 8. CLOSE INVENTORY MODAL
+            if (invModal.open) {
+                setInvModal({
+                    open: false,
+                    mode: 'add',
+                    data: null
+                });
+                return;
+            }
+
+            // 9. CLOSE STAFF MODAL
+            if (staffModal.open) {
+                setStaffModal({ open: false });
+                return;
+            }
+
+            // 10. CLOSE MISSING ITEM MODAL
+            if (missingModal.open) {
+                setMissingModal({ open: false });
+                return;
+            }
+
+            // 11. CLOSE PURCHASE MODAL
+            if (purchaseModal.open) {
+                setPurchaseModal({ open: false });
+                return;
+            }
+
+            // 12. CLOSE DRAWER MODAL
+            if (drawerModal) {
+                setDrawerModal(false);
+                return;
+            }
+
+            // 13. CLOSE PENDING MODAL
+            if (pendingModal) {
+                setPendingModal(false);
+                return;
+            }
+
+            // 14. CLOSE CUSTOM ITEM FORM
+            if (addingItemTo) {
+                setAddingItemTo(null);
+                return;
+            }
+
+            // 15. CLOSE SCAN ORDER
+            if (scanOrderId) {
+                setScanOrderId(null);
+                setBarcodeInput('');
+                return;
+            }
+
+            // 16. CLOSE PIN MODAL
+            if (pinModalOpen) {
+                setPinModalOpen(false);
+                setTargetTab(null);
+                return;
+            }
+
+            // 17. CLOSE SIDEBAR
+            if (isSidebarOpen) {
+                setIsSidebarOpen(false);
+                return;
+            }
+
+            // 18. ANY OTHER PAGE → LIVE ORDERS
+            if (activeTab !== 'orders') {
+                setActiveTab('orders');
+                return;
+            }
+
+            // 19. LIVE ORDERS → CONFIRM APP CLOSE
+            const shouldClose = window.confirm(
+                'Close VALO Admin?\n\nAre you sure you want to close the app?'
+            );
+
+            if (shouldClose) {
+                App.exitApp();
+            }
+        });
+    };
+
+    setupBackButton();
+
+    return () => {
+        if (backListener) {
+            backListener.remove();
+        }
+    };
+}, [
+    activeTab,
+    createBillModal,
+    viewOrderDetails,
+    editHistoryModal,
+    adminPaymentModal,
+    itemModal,
+    catModal,
+    momentModal,
+    invModal,
+    staffModal,
+    missingModal,
+    purchaseModal,
+    drawerModal,
+    pendingModal,
+    addingItemTo,
+    scanOrderId,
+    pinModalOpen,
+    isSidebarOpen
+]);
     
     useEffect(() => {
         inventoryItems.forEach(item => {
@@ -1256,8 +1439,8 @@ const handleSaveMissingItem = async (e) => {
         ));
     };
 
-    const handleCreateAndPrintBill = async () => {
-        const regularItems = {};
+const handleCreateBill = async () => {
+            const regularItems = {};
         const customItems = [];
         let addedTotal = 0;
 
@@ -1318,11 +1501,12 @@ const handleSaveMissingItem = async (e) => {
                 }).eq('id', dbOrder.id);
 
                 if (error) alert("Error merging bill.");
-                else {
-                    alert(`Successfully merged into active Order #${dbOrder.id}`);
-                    printBill({ ...updatedDetails, id: dbOrder.id, status: dbOrder.status, tableNo: dbOrder.table_no, total: mergedTotal });
-                    resetPOS();
-                }
+               else {
+    alert(`Successfully merged into active Order #${dbOrder.id}`);
+    resetPOS();
+    setActiveTab('orders');
+    fetchData();
+}
             }
         } else {
             const orderPayload = {
@@ -1344,15 +1528,18 @@ const handleSaveMissingItem = async (e) => {
                 }
             };
 
-            const { data, error } = await supabase.from('orders').insert([orderPayload]).select();
-            if (error) alert("Error creating bill.");
-            else {
-                if (data && data.length > 0) {
-                     const newOrder = { ...data[0].order_details, id: data[0].id, status: data[0].status, tableNo: data[0].table_no, total: data[0].total };
-                     printBill(newOrder); 
-                }
-                resetPOS();
-            }
+           const { data, error } = await supabase
+    .from('orders')
+    .insert([orderPayload])
+    .select();
+
+if (error) {
+    alert("Error creating bill.");
+} else {
+    resetPOS();
+    setActiveTab('orders');
+    fetchData();
+}
         }
     };
 
@@ -2115,10 +2302,17 @@ const handleSaveMissingItem = async (e) => {
 
                                     <div className="flex flex-col md:flex-row justify-between items-center pt-4 border-t border-white/10 gap-4">
                                         <div className="text-lg text-gray-400">Grand Total: <span className="text-white font-bold text-3xl ml-2">₹{billItemsList.reduce((sum, i) => sum + (i.price * i.qty), 0)}</span></div>
-                                        <button onClick={handleCreateAndPrintBill} disabled={billItemsList.length === 0} className={`w-full md:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${billItemsList.length > 0 ? 'bg-green-500 text-black hover:bg-green-400 shadow-lg shadow-green-500/20' : 'bg-slate-700 text-gray-500 cursor-not-allowed'}`}>
-                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
-                                            Create & Print
-                                        </button>
+                                        <button
+    onClick={handleCreateBill}
+    disabled={billItemsList.length === 0}
+    className={`w-full md:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${
+        billItemsList.length > 0
+            ? 'bg-green-500 text-black hover:bg-green-400 shadow-lg shadow-green-500/20'
+            : 'bg-slate-700 text-gray-500 cursor-not-allowed'
+    }`}
+>
+    Create
+</button>
                                     </div>
                                 </div>
                             </div>
