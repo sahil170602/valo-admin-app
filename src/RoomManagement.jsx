@@ -86,7 +86,6 @@ const getBookingDateObj = (dateStr, timeStr) => {
     return new Date(year, month - 1, day, hour, minute, 0);
 };
 
-// --- NATIVE NOTIFICATION TRIGGER ---
 const triggerNativeNotification = async (title, body) => {
     if (typeof window !== 'undefined' && "Notification" in window && Notification.permission === 'granted') {
         new Notification(title, { body, icon: '/splash.png' });
@@ -117,6 +116,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [bookings, setBookings] = useState([]);
     const [expenses, setExpenses] = useState([]);
+    const [roomPrices, setRoomPrices] = useState({ 'Room 1': 1000, 'Room 2': 1000 }); // Settings State
     const [tick, setTick] = useState(Date.now());
     const notifiedRef = useRef(new Set());
     const appName = localStorage.getItem('valo_app_name') || 'VALO';
@@ -127,7 +127,6 @@ export default function RoomManagement({ appMode, toggleMode }) {
     const [numMembers, setNumMembers] = useState(1);
     const [membersData, setMembersData] = useState([{ id: 1, name: '', phone: '', age: '', gender: 'Male', aadhaarFront: null, aadhaarBack: null, isSaved: false }]);
     const [selectedSlot, setSelectedSlot] = useState(null);
-    const [baseAmount, setBaseAmount] = useState(1000);
     const [customAmount, setCustomAmount] = useState(null);
     const [advanceAmount, setAdvanceAmount] = useState(0);
 
@@ -149,6 +148,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
         const channel = supabase.channel('room-updates')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'room_bookings' }, fetchRoomData)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'room_expenses' }, fetchRoomData)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settings' }, fetchRoomData)
             .subscribe();
         return () => supabase.removeChannel(channel);
     }, []);
@@ -158,9 +158,14 @@ export default function RoomManagement({ appMode, toggleMode }) {
         if (bData) setBookings(bData);
         const { data: eData } = await supabase.from('room_expenses').select('*').order('timestamp', { ascending: false });
         if (eData) setExpenses(eData);
+        const { data: sData } = await supabase.from('room_settings').select('*');
+        if (sData) {
+            const prices = {};
+            sData.forEach(row => { prices[row.room_no] = Number(row.price_per_slot); });
+            setRoomPrices(prev => ({ ...prev, ...prices }));
+        }
     };
 
-    // --- SMART PERSISTENT TIMER & NOTIFICATION ENGINE ---
     useEffect(() => {
         const interval = setInterval(() => {
             const now = Date.now();
@@ -171,17 +176,14 @@ export default function RoomManagement({ appMode, toggleMode }) {
                     const startObj = getBookingDateObj(b.booking_date, b.slot_start);
                     const diffSecs = Math.floor((startObj.getTime() - now) / 1000);
 
-                    // 12 Hour Notification (43200 seconds)
                     if (diffSecs <= 43200 && diffSecs > 43190 && !notifiedRef.current.has(`${b.id}_12h`)) {
                         notifiedRef.current.add(`${b.id}_12h`);
                         triggerNativeNotification(`12 Hours Left!`, `Booking for ${b.customer_name} starts in 12 hours.`);
                     }
-                    // 2 Hour Notification (7200 seconds)
                     if (diffSecs <= 7200 && diffSecs > 7190 && !notifiedRef.current.has(`${b.id}_2h`)) {
                         notifiedRef.current.add(`${b.id}_2h`);
                         triggerNativeNotification(`Live Dashboard Alert`, `Booking for ${b.customer_name} is now in Live Dashboard!`);
                     }
-                    // Exact Start Time Notification (0 seconds)
                     if (diffSecs <= 0 && diffSecs > -10 && !notifiedRef.current.has(`${b.id}_start`)) {
                         notifiedRef.current.add(`${b.id}_start`);
                         triggerNativeNotification(`Room Started`, `The slot for ${b.customer_name} has just begun!`);
@@ -191,6 +193,17 @@ export default function RoomManagement({ appMode, toggleMode }) {
         }, 1000);
         return () => clearInterval(interval);
     }, [bookings]);
+
+    const handleSaveSettings = async (e) => {
+        e.preventDefault();
+        const updates = [
+            { room_no: 'Room 1', price_per_slot: roomPrices['Room 1'] },
+            { room_no: 'Room 2', price_per_slot: roomPrices['Room 2'] }
+        ];
+        const { error } = await supabase.from('room_settings').upsert(updates);
+        if (error) alert(error.message);
+        else alert('Room prices updated successfully!');
+    };
 
     const handleNumMembersChange = (e) => {
         const num = parseInt(e.target.value);
@@ -251,7 +264,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
             slot_end: selectedSlot.endVal,
             status: 'Upcoming',
             members_data: processedMembers,
-            total_amount: customAmount !== null ? customAmount : baseAmount,
+            total_amount: customAmount !== null ? customAmount : roomPrices[roomNo],
             advance_paid: finalAdvance
         };
 
@@ -297,7 +310,6 @@ export default function RoomManagement({ appMode, toggleMode }) {
         fetchRoomData();
     };
 
-    // --- FINANCIAL ENGINE ---
     const calculateDailyFinancials = () => {
         const dailyData = {};
         bookings.forEach(b => {
@@ -394,14 +406,13 @@ export default function RoomManagement({ appMode, toggleMode }) {
     const totalTxnPages = Math.max(1, Math.ceil(filteredTxns.length / txnsPerPage));
     const currentTxns = filteredTxns.slice((transactionPage - 1) * txnsPerPage, transactionPage * txnsPerPage);
 
-    // --- TIMERS AND LISTS CALCULATION ---
     const nowMs = tick;
 
     const liveBookings = bookings.filter(b => {
         if (b.status !== 'Upcoming') return false;
         const startObj = getBookingDateObj(b.booking_date, b.slot_start);
         const endObj = getBookingDateObj(b.booking_date, b.slot_end);
-        if (startObj.getTime() < endObj.getTime() && endObj.getTime() < nowMs) return true; // Keep overdue slots in Live until completed
+        if (startObj.getTime() < endObj.getTime() && endObj.getTime() < nowMs) return true;
         const diffHrs = (startObj.getTime() - nowMs) / (1000 * 60 * 60);
         return diffHrs <= 2.0; 
     });
@@ -415,7 +426,6 @@ export default function RoomManagement({ appMode, toggleMode }) {
 
     const completedBookings = bookings.filter(b => b.status === 'Completed');
 
-    // DUAL-PHASE TIMER RENDERER
     const getTimerData = (booking) => {
         const startObj = getBookingDateObj(booking.booking_date, booking.slot_start);
         const endObj = getBookingDateObj(booking.booking_date, booking.slot_end);
@@ -423,21 +433,18 @@ export default function RoomManagement({ appMode, toggleMode }) {
         const endMs = endObj.getTime();
 
         if (nowMs < startMs) {
-            // PHASE 1: REVERSE COUNTDOWN (Before slot starts)
             const diff = startMs - nowMs;
             const h = Math.floor(diff / (1000 * 60 * 60));
             const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
             const s = Math.floor((diff % (1000 * 60)) / 1000);
             return { label: 'Starts In', timeString: `-${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`, color: 'text-yellow-400', pulse: false };
         } else if (nowMs >= startMs && nowMs <= endMs) {
-            // PHASE 2: FORWARD COUNTUP (During slot)
             const diff = nowMs - startMs;
             const h = Math.floor(diff / (1000 * 60 * 60));
             const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
             const s = Math.floor((diff % (1000 * 60)) / 1000);
             return { label: 'Running Time', timeString: `+${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`, color: 'text-green-400', pulse: false };
         } else {
-            // OVERDUE
             const diff = nowMs - endMs;
             const h = Math.floor(diff / (1000 * 60 * 60));
             const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
@@ -472,6 +479,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
                     <SidebarBtn icon="💸" label="Room Expenses" active={activeTab === 'expenses'} onClick={() => { setActiveTab('expenses'); setIsSidebarOpen(false); }} />
                     <SidebarBtn icon="📈" label="Analytics" active={activeTab === 'analytics'} onClick={() => { setActiveTab('analytics'); setIsSidebarOpen(false); }} />
                     <SidebarBtn icon="👥" label="Users & History" active={activeTab === 'users'} onClick={() => { setActiveTab('users'); setIsSidebarOpen(false); }} />
+                    <SidebarBtn icon="⚙️" label="Settings" active={activeTab === 'settings'} onClick={() => { setActiveTab('settings'); setIsSidebarOpen(false); }} />
                 </nav>
             </aside>
 
@@ -543,35 +551,22 @@ export default function RoomManagement({ appMode, toggleMode }) {
                     {/* --- TAB 1: LIVE BOOKINGS --- */}
                     {activeTab === 'live' && (
                         <div className="max-w-6xl mx-auto w-full space-y-6">
-                            
-                            {/* --- FILTER TABS (2 ROWS) --- */}
                             <div className="flex flex-col gap-3 mb-8 border-b border-white/10 pb-6">
                                 <div className="flex justify-center gap-3">
-                                    <button 
-                                        onClick={() => setBookingFilter('Upcoming')} 
-                                        className={`w-1/2 md:w-48 px-4 py-3 rounded-xl text-sm font-bold transition shadow-lg border ${bookingFilter === 'Upcoming' ? 'bg-yellow-500 text-black border-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.4)] transform scale-105' : 'bg-slate-800 text-gray-400 border-white/5 hover:bg-slate-700'}`}
-                                    >
+                                    <button onClick={() => setBookingFilter('Upcoming')} className={`w-1/2 md:w-48 px-4 py-3 rounded-xl text-sm font-bold transition shadow-lg border ${bookingFilter === 'Upcoming' ? 'bg-yellow-500 text-black border-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.4)] transform scale-105' : 'bg-slate-800 text-gray-400 border-white/5 hover:bg-slate-700'}`}>
                                         📅 Upcoming ({'>'} 2 Hrs)
                                     </button>
-                                    <button 
-                                        onClick={() => setBookingFilter('Completed')} 
-                                        className={`w-1/2 md:w-48 px-4 py-3 rounded-xl text-sm font-bold transition shadow-lg border ${bookingFilter === 'Completed' ? 'bg-green-500 text-black border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.4)] transform scale-105' : 'bg-slate-800 text-gray-400 border-white/5 hover:bg-slate-700'}`}
-                                    >
+                                    <button onClick={() => setBookingFilter('Completed')} className={`w-1/2 md:w-48 px-4 py-3 rounded-xl text-sm font-bold transition shadow-lg border ${bookingFilter === 'Completed' ? 'bg-green-500 text-black border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.4)] transform scale-105' : 'bg-slate-800 text-gray-400 border-white/5 hover:bg-slate-700'}`}>
                                         ✅ Completed
                                     </button>
                                 </div>
-                                
                                 <div className="flex justify-center">
-                                    <button 
-                                        onClick={() => setBookingFilter('Live')} 
-                                        className={`w-full md:w-[396px] px-6 py-3 rounded-xl text-sm font-bold transition shadow-lg border flex items-center justify-center gap-2 ${bookingFilter === 'Live' ? 'bg-red-500 text-white border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.4)] transform scale-105' : 'bg-slate-800 text-gray-400 border-white/5 hover:bg-slate-700'}`}
-                                    >
+                                    <button onClick={() => setBookingFilter('Live')} className={`w-full md:w-[396px] px-6 py-3 rounded-xl text-sm font-bold transition shadow-lg border flex items-center justify-center gap-2 ${bookingFilter === 'Live' ? 'bg-red-500 text-white border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.4)] transform scale-105' : 'bg-slate-800 text-gray-400 border-white/5 hover:bg-slate-700'}`}>
                                         <span className={`${bookingFilter === 'Live' ? 'animate-pulse' : ''}`}>🔴</span> Live Dashboard ({'<'} 2 Hrs)
                                     </button>
                                 </div>
                             </div>
 
-                            {/* FILTER: LIVE NOW OR WITHIN 2 HOURS */}
                             {bookingFilter === 'Live' && (
                                 <div className="animate-fade-in">
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -580,16 +575,11 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                             return (
                                                 <div key={b.id} className="bg-slate-800 p-5 rounded-xl border-l-4 border-red-500 shadow-[0_0_20px_rgba(239,68,68,0.2)] relative">
                                                     <div className="flex justify-between items-start mb-2">
-                                                        <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-0.5 rounded-full inline-block">
-                                                            {b.room_no || 'Room 1'}
-                                                        </span>
-                                                        <span className="text-xs font-bold bg-red-500/20 text-red-400 px-2 py-1 rounded border border-red-500/50 animate-pulse">
-                                                            {timer.phase === 'countdown' ? 'Starts Soon' : 'Running'}
-                                                        </span>
+                                                        <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-0.5 rounded-full inline-block">{b.room_no || 'Room 1'}</span>
+                                                        <span className="text-xs font-bold bg-red-500/20 text-red-400 px-2 py-1 rounded border border-red-500/50 animate-pulse">{timer.phase === 'countdown' ? 'Starts Soon' : 'Running'}</span>
                                                     </div>
                                                     <h3 className="font-bold text-lg mb-1 text-white">{b.customer_name}</h3>
                                                     <p className="text-sm text-gray-400 mb-4">📞 {b.phone} | 👥 {b.members} Members</p>
-                                                    
                                                     <div className="bg-black/40 p-4 rounded-lg text-center mb-4 border border-red-500/30">
                                                         <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">{timer.label}</p>
                                                         <p className={`text-3xl font-black font-mono tracking-widest ${timer.color} ${timer.pulse ? 'animate-pulse' : ''}`}>{timer.timeString}</p>
@@ -603,17 +593,12 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                 </div>
                             )}
 
-                            {/* FILTER: UPCOMING > 2 HOURS */}
                             {bookingFilter === 'Upcoming' && (
                                 <div className="animate-fade-in">
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                         {upcomingBookings.length === 0 ? <p className="text-gray-600 text-center col-span-full py-10">No distant upcoming bookings.</p> : upcomingBookings.map(b => (
                                             <div key={b.id} className="bg-slate-800 p-5 rounded-xl border-l-4 border-yellow-500 shadow-lg relative">
-                                                <div className="mb-2">
-                                                    <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-0.5 rounded-full inline-block">
-                                                        {b.room_no || 'Room 1'}
-                                                    </span>
-                                                </div>
+                                                <div className="mb-2"><span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-0.5 rounded-full inline-block">{b.room_no || 'Room 1'}</span></div>
                                                 <h3 className="font-bold text-lg mb-1 text-white">{b.customer_name}</h3>
                                                 <p className="text-sm text-gray-400 mb-4">📞 {b.phone}</p>
                                                 <div className="bg-black/30 p-3 rounded-lg text-sm border border-white/5">
@@ -626,19 +611,14 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                 </div>
                             )}
 
-                            {/* FILTER: COMPLETED */}
                             {bookingFilter === 'Completed' && (
                                 <div className="animate-fade-in">
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                         {completedBookings.map(b => (
                                             <div key={b.id} className="bg-slate-800/50 p-5 rounded-xl border-l-4 border-green-500/50 relative shadow-lg">
                                                 <div className="flex justify-between items-start mb-2">
-                                                    <span className="bg-gray-700 text-white text-[10px] font-bold px-2 py-0.5 rounded-full inline-block">
-                                                        {b.room_no || 'Room 1'}
-                                                    </span>
-                                                    <span className="text-[10px] font-bold bg-green-500/20 text-green-400 px-2 py-1 rounded inline-block">
-                                                        Completed
-                                                    </span>
+                                                    <span className="bg-gray-700 text-white text-[10px] font-bold px-2 py-0.5 rounded-full inline-block">{b.room_no || 'Room 1'}</span>
+                                                    <span className="text-[10px] font-bold bg-green-500/20 text-green-400 px-2 py-1 rounded inline-block">Completed</span>
                                                 </div>
                                                 <h3 className="font-bold text-lg mb-1 text-gray-300">{b.customer_name}</h3>
                                                 <div className="bg-black/30 p-3 rounded-lg text-sm mt-4 border border-white/5">
@@ -658,24 +638,19 @@ export default function RoomManagement({ appMode, toggleMode }) {
                     {activeTab === 'book' && (
                         <div className="max-w-4xl mx-auto w-full">
                             <h2 className="text-2xl font-bold mb-6 text-yellow-500">Room Booking Flow</h2>
-                            
                             <div className="flex gap-2 mb-6">
                                 <div className={`h-2 flex-1 rounded-full ${step >= 1 ? 'bg-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.5)]' : 'bg-slate-700'}`}></div>
                                 <div className={`h-2 flex-1 rounded-full ${step >= 2 ? 'bg-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.5)]' : 'bg-slate-700'}`}></div>
                                 <div className={`h-2 flex-1 rounded-full ${step >= 3 ? 'bg-yellow-500 shadow-[0_0_10px_rgba(234,179,8,0.5)]' : 'bg-slate-700'}`}></div>
                             </div>
-
                             <div className="bg-slate-800 p-6 rounded-xl border border-yellow-500/20 shadow-lg">
-                                {/* --- STEP 1: ROOM & MEMBERS --- */}
+                                {/* STEP 1 */}
                                 {step === 1 && (
                                     <div className="space-y-6 animate-fade-in">
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b border-white/10">
                                             <div>
                                                 <label className="text-xs text-gray-400 uppercase font-bold tracking-wider block mb-1">Select Room</label>
-                                                <select 
-                                                    className="w-full bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-yellow-400 font-bold focus:border-yellow-500 outline-none"
-                                                    value={roomNo} onChange={e => setRoomNo(e.target.value)}
-                                                >
+                                                <select className="w-full bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-yellow-400 font-bold focus:border-yellow-500 outline-none" value={roomNo} onChange={e => setRoomNo(e.target.value)}>
                                                     <option value="Room 1" className="bg-slate-800 text-white">Room 1</option>
                                                     <option value="Room 2" className="bg-slate-800 text-white">Room 2</option>
                                                 </select>
@@ -735,47 +710,25 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                                 </div>
                                             ))}
                                         </div>
-
-                                        <button 
-                                            onClick={() => setStep(2)} 
-                                            disabled={!membersData.every(m => m.isSaved)}
-                                            className="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-black py-4 rounded-xl shadow-lg transition text-lg mt-4 disabled:opacity-30 disabled:cursor-not-allowed"
-                                        >
-                                            Next: Select Slot
-                                        </button>
+                                        <button onClick={() => setStep(2)} disabled={!membersData.every(m => m.isSaved)} className="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-black py-4 rounded-xl shadow-lg transition text-lg mt-4 disabled:opacity-30 disabled:cursor-not-allowed">Next: Select Slot</button>
                                     </div>
                                 )}
 
-                                {/* --- STEP 2: SLOTS --- */}
+                                {/* STEP 2 */}
                                 {step === 2 && (
                                     <div className="space-y-6 animate-fade-in">
                                         <div className="flex justify-between items-center bg-black/30 p-4 rounded-xl border border-white/5">
-                                            <div>
-                                                <p className="text-xs text-gray-500 uppercase tracking-widest">Booking Date</p>
-                                                <p className="font-bold text-white text-lg">{bookingDate}</p>
-                                            </div>
-                                            <div className="text-right">
-                                                <p className="text-xs text-gray-500 uppercase tracking-widest">Room</p>
-                                                <p className="font-bold text-yellow-400 text-lg">{roomNo}</p>
-                                            </div>
+                                            <div><p className="text-xs text-gray-500 uppercase tracking-widest">Booking Date</p><p className="font-bold text-white text-lg">{bookingDate}</p></div>
+                                            <div className="text-right"><p className="text-xs text-gray-500 uppercase tracking-widest">Room</p><p className="font-bold text-yellow-400 text-lg">{roomNo}</p></div>
                                         </div>
-
                                         <div>
                                             <label className="text-xs text-gray-400 uppercase font-bold tracking-wider block mb-3">Available 1-Hour Slots</label>
                                             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 max-h-80 overflow-y-auto pr-2">
-                                                {getAvailableSlots().length === 0 ? (
-                                                    <p className="text-red-400 text-sm col-span-full">No slots available for today.</p>
-                                                ) : (
+                                                {getAvailableSlots().length === 0 ? <p className="text-red-400 text-sm col-span-full">No slots available for today.</p> : (
                                                     getAvailableSlots().map(slot => {
                                                         const isBooked = bookings.some(b => b.booking_date === bookingDate && b.slot_start === slot.startVal && b.room_no === roomNo && b.status !== 'Cancelled');
                                                         return (
-                                                            <button 
-                                                                key={slot.startVal}
-                                                                type="button"
-                                                                disabled={isBooked}
-                                                                onClick={() => setSelectedSlot(slot)}
-                                                                className={`p-3 rounded-lg text-sm font-bold border transition ${isBooked ? 'bg-red-500/10 border-red-500/30 text-red-500 opacity-50 cursor-not-allowed' : selectedSlot?.startVal === slot.startVal ? 'bg-yellow-500 border-yellow-500 text-black shadow-[0_0_15px_rgba(234,179,8,0.4)] transform scale-105' : 'bg-black/30 border-white/10 text-gray-300 hover:border-yellow-500'}`}
-                                                            >
+                                                            <button key={slot.startVal} type="button" disabled={isBooked} onClick={() => setSelectedSlot(slot)} className={`p-3 rounded-lg text-sm font-bold border transition ${isBooked ? 'bg-red-500/10 border-red-500/30 text-red-500 opacity-50 cursor-not-allowed' : selectedSlot?.startVal === slot.startVal ? 'bg-yellow-500 border-yellow-500 text-black shadow-[0_0_15px_rgba(234,179,8,0.4)] transform scale-105' : 'bg-black/30 border-white/10 text-gray-300 hover:border-yellow-500'}`}>
                                                                 {slot.label}
                                                             </button>
                                                         );
@@ -783,7 +736,6 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                                 )}
                                             </div>
                                         </div>
-
                                         <div className="flex gap-3 mt-8">
                                             <button onClick={() => setStep(1)} className="w-1/3 bg-slate-700 hover:bg-slate-600 text-white font-bold py-4 rounded-xl transition">Back</button>
                                             <button onClick={() => setStep(3)} disabled={!selectedSlot} className="w-2/3 bg-yellow-500 hover:bg-yellow-400 text-black font-black py-4 rounded-xl shadow-lg transition text-lg disabled:opacity-30 disabled:cursor-not-allowed">Next: Payment</button>
@@ -791,24 +743,14 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                     </div>
                                 )}
 
-                                {/* --- STEP 3: PAYMENT & ADVANCE --- */}
+                                {/* STEP 3 */}
                                 {step === 3 && (
                                     <div className="space-y-6 animate-fade-in text-center py-6">
                                         <div className="bg-black/30 p-6 rounded-xl border border-white/5 max-w-sm mx-auto">
                                             <p className="text-sm text-gray-400 uppercase font-bold tracking-widest mb-2">Total Amount</p>
-                                            <h2 className="text-5xl font-black text-yellow-500 mb-6">₹{customAmount !== null ? customAmount : baseAmount}</h2>
-                                            
-                                            <button 
-                                                onClick={() => {
-                                                    const res = window.prompt("Enter Custom Amount (Discounts/Overtime) ₹:", baseAmount);
-                                                    if (res !== null && !isNaN(res)) setCustomAmount(Number(res));
-                                                }}
-                                                className="text-xs text-yellow-400 underline hover:text-white transition"
-                                            >
-                                                Apply Custom Amount / Discount
-                                            </button>
+                                            <h2 className="text-5xl font-black text-yellow-500 mb-6">₹{customAmount !== null ? customAmount : roomPrices[roomNo]}</h2>
+                                            <button onClick={() => { const res = window.prompt(`Enter Custom Amount (Discounts/Overtime) ₹:`, roomPrices[roomNo]); if (res !== null && !isNaN(res)) setCustomAmount(Number(res)); }} className="text-xs text-yellow-400 underline hover:text-white transition">Apply Custom Amount / Discount</button>
                                         </div>
-
                                         <div className="flex gap-3 max-w-sm mx-auto pt-4">
                                             <button onClick={() => setStep(2)} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-4 rounded-xl transition">Back</button>
                                             <button onClick={handleConfirmBooking} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-black py-4 rounded-xl shadow-[0_0_20px_rgba(34,197,94,0.4)] transition text-lg">Confirm</button>
@@ -823,17 +765,10 @@ export default function RoomManagement({ appMode, toggleMode }) {
                     {activeTab === 'expenses' && financials && (
                         <div className="max-w-6xl mx-auto w-full pb-10">
                             <h2 className="text-2xl font-bold mb-6 text-yellow-500">Room Expense & Income Management</h2>
-                            
                             <div className="mb-6 flex gap-4 items-center">
                                 <label className="text-sm font-bold text-gray-400">Select Date:</label>
-                                <input 
-                                    type="date" 
-                                    value={expenseDateFilter}
-                                    onChange={(e) => setExpenseDateFilter(e.target.value)}
-                                    className="bg-slate-800 border border-white/10 rounded-lg p-2 text-white focus:border-yellow-500 outline-none transition"
-                                />
+                                <input type="date" value={expenseDateFilter} onChange={(e) => setExpenseDateFilter(e.target.value)} className="bg-slate-800 border border-white/10 rounded-lg p-2 text-white focus:border-yellow-500 outline-none transition" />
                             </div>
-
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                                 <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-t-4 border-t-green-500">
                                     <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4">Total Income</h3>
@@ -841,10 +776,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                         <div className="flex justify-between items-center"><span className="text-gray-300 text-sm">Cash Income</span><span className="font-bold text-green-400">₹{financials.lifetimeCashIn}</span></div>
                                         <div className="flex justify-between items-center"><span className="text-gray-300 text-sm">Online Income</span><span className="font-bold text-green-400">₹{financials.lifetimeOnlineIn}</span></div>
                                     </div>
-                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end">
-                                        <span className="text-xs text-gray-500 uppercase font-bold">Total</span>
-                                        <span className="text-3xl font-black text-white leading-none">₹{financials.lifetimeCashIn + financials.lifetimeOnlineIn}</span>
-                                    </div>
+                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end"><span className="text-xs text-gray-500 uppercase font-bold">Total</span><span className="text-3xl font-black text-white leading-none">₹{financials.lifetimeCashIn + financials.lifetimeOnlineIn}</span></div>
                                 </div>
                                 <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-t-4 border-t-red-500">
                                     <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-4">Total Outcome</h3>
@@ -852,10 +784,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                         <div className="flex justify-between items-center"><span className="text-gray-300 text-sm">Cash Outcome</span><span className="font-bold text-red-400">₹{financials.lifetimeCashOut}</span></div>
                                         <div className="flex justify-between items-center"><span className="text-gray-300 text-sm">Online Outcome</span><span className="font-bold text-red-400">₹{financials.lifetimeOnlineOut}</span></div>
                                     </div>
-                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end">
-                                        <span className="text-xs text-gray-500 uppercase font-bold">Total</span>
-                                        <span className="text-3xl font-black text-white leading-none">₹{financials.lifetimeCashOut + financials.lifetimeOnlineOut}</span>
-                                    </div>
+                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end"><span className="text-xs text-gray-500 uppercase font-bold">Total</span><span className="text-3xl font-black text-white leading-none">₹{financials.lifetimeCashOut + financials.lifetimeOnlineOut}</span></div>
                                 </div>
                                 <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-t-4 border-t-yellow-500 relative overflow-hidden">
                                     <h3 className="text-sm font-bold text-yellow-500 uppercase tracking-widest mb-4">Remaining Balance</h3>
@@ -863,10 +792,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                         <div className="flex justify-between items-center"><span className="text-gray-300 text-sm">Remaining Cash</span><span className="font-bold text-yellow-300">₹{financials.lifetimeCashRem}</span></div>
                                         <div className="flex justify-between items-center"><span className="text-gray-300 text-sm">Remaining Online</span><span className="font-bold text-yellow-300">₹{financials.lifetimeOnlineRem}</span></div>
                                     </div>
-                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end">
-                                        <span className="text-xs text-yellow-500/50 uppercase font-bold">Total Net</span>
-                                        <span className="text-3xl font-black text-yellow-500 leading-none">₹{financials.lifetimeTotalRem}</span>
-                                    </div>
+                                    <div className="pt-4 border-t border-white/10 flex justify-between items-end"><span className="text-xs text-yellow-500/50 uppercase font-bold">Total Net</span><span className="text-3xl font-black text-yellow-500 leading-none">₹{financials.lifetimeTotalRem}</span></div>
                                 </div>
                             </div>
 
@@ -935,25 +861,13 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                 <h2 className="text-2xl font-bold text-yellow-500">Room Sales Analytics</h2>
                                 <button onClick={() => exportCSV(currentTxns, `Room_Analytics_${analyticsFilter}.csv`)} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
                             </div>
-                            
                             <div className="flex gap-2 mb-6 overflow-x-auto pb-2 scrollbar-hide items-center w-full max-w-[100vw]">
                                 {['Today', 'Weekly', 'Monthly', 'Yearly', 'All', 'Custom'].map(filter => (
-                                    <button 
-                                        key={filter} 
-                                        onClick={() => setAnalyticsFilter(filter)} 
-                                        className={`px-6 py-2 rounded-lg text-sm font-bold transition ${analyticsFilter === filter ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700 hover:text-white border border-white/10'}`}
-                                    >
+                                    <button key={filter} onClick={() => setAnalyticsFilter(filter)} className={`px-6 py-2 rounded-lg text-sm font-bold transition ${analyticsFilter === filter ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700 hover:text-white border border-white/10'}`}>
                                         {filter}
                                     </button>
                                 ))}
-                                {analyticsFilter === 'Custom' && (
-                                    <input 
-                                        type="date" 
-                                        value={analyticsCustomDate}
-                                        onChange={(e) => setAnalyticsCustomDate(e.target.value)}
-                                        className="bg-slate-800 border border-white/10 rounded-lg p-2 text-sm text-white focus:border-yellow-500 outline-none transition ml-2"
-                                    />
-                                )}
+                                {analyticsFilter === 'Custom' && <input type="date" value={analyticsCustomDate} onChange={(e) => setAnalyticsCustomDate(e.target.value)} className="bg-slate-800 border border-white/10 rounded-lg p-2 text-sm text-white focus:border-yellow-500 outline-none transition ml-2" />}
                             </div>
 
                             {(() => {
@@ -963,39 +877,21 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                     const t = Number(b.total_amount);
                                     totalRev += t;
                                     if (b.room_no === 'Room 1') r1Rev += t; else r2Rev += t;
-                                    
                                     const pm = String(b.payment_method || 'Cash').toLowerCase();
                                     if (pm === 'split') { totalC += Number(b.split_cash||0); totalO += Number(b.split_online||0); }
                                     else if (pm.includes('online')) { totalO += t; }
                                     else { totalC += t; }
                                 });
-
                                 return (
                                     <>
                                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-yellow-500">
-                                                <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Total Revenue ({analyticsFilter})</p>
-                                                <p className="text-3xl font-black text-white mt-1">₹{totalRev}</p>
-                                            </div>
-                                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-green-500">
-                                                <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Cash Received</p>
-                                                <p className="text-3xl font-black text-green-400 mt-1">₹{totalC}</p>
-                                            </div>
-                                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
-                                                <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Online Received</p>
-                                                <p className="text-3xl font-black text-blue-400 mt-1">₹{totalO}</p>
-                                            </div>
+                                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-yellow-500"><p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Total Revenue ({analyticsFilter})</p><p className="text-3xl font-black text-white mt-1">₹{totalRev}</p></div>
+                                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-green-500"><p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Cash Received</p><p className="text-3xl font-black text-green-400 mt-1">₹{totalC}</p></div>
+                                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500"><p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Online Received</p><p className="text-3xl font-black text-blue-400 mt-1">₹{totalO}</p></div>
                                         </div>
-
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                                            <div onClick={() => setSelectedRevenueCategory('Room 1')} className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-purple-500 cursor-pointer hover:-translate-y-1 transition hover:border-purple-500/50">
-                                                <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Room 1 Revenue</p>
-                                                <p className="text-2xl font-black text-purple-400 mt-1">₹{r1Rev}</p>
-                                            </div>
-                                            <div onClick={() => setSelectedRevenueCategory('Room 2')} className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-pink-500 cursor-pointer hover:-translate-y-1 transition hover:border-pink-500/50">
-                                                <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Room 2 Revenue</p>
-                                                <p className="text-2xl font-black text-pink-400 mt-1">₹{r2Rev}</p>
-                                            </div>
+                                            <div onClick={() => setSelectedRevenueCategory('Room 1')} className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-purple-500 cursor-pointer hover:-translate-y-1 transition hover:border-purple-500/50"><p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Room 1 Revenue</p><p className="text-2xl font-black text-purple-400 mt-1">₹{r1Rev}</p></div>
+                                            <div onClick={() => setSelectedRevenueCategory('Room 2')} className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-pink-500 cursor-pointer hover:-translate-y-1 transition hover:border-pink-500/50"><p className="text-gray-400 text-xs font-bold uppercase tracking-wider">Room 2 Revenue</p><p className="text-2xl font-black text-pink-400 mt-1">₹{r2Rev}</p></div>
                                         </div>
                                     </>
                                 );
@@ -1013,9 +909,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                         </BarChart>
                                     </ResponsiveContainer>
                                 ) : (
-                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 font-bold space-y-3">
-                                        <p>No sales data found for {analyticsFilter.toLowerCase()}.</p>
-                                    </div>
+                                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 font-bold space-y-3"><p>No sales data found for {analyticsFilter.toLowerCase()}.</p></div>
                                 )}
                             </div>
 
@@ -1023,13 +917,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
                             <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full max-w-[100vw] overflow-x-auto shadow-lg">
                                 <table className="w-full text-left text-sm text-gray-400 min-w-[800px]">
                                     <thead className="bg-black/30 text-white uppercase text-xs">
-                                        <tr>
-                                            <th className="p-4">Booking ID</th>
-                                            <th className="p-4">Date & Room</th>
-                                            <th className="p-4">Customer</th>
-                                            <th className="p-4">Amount</th>
-                                            <th className="p-4">Payment Method</th>
-                                        </tr>
+                                        <tr><th className="p-4">Booking ID</th><th className="p-4">Date & Room</th><th className="p-4">Customer</th><th className="p-4">Amount</th><th className="p-4">Payment Method</th></tr>
                                     </thead>
                                     <tbody>
                                         {currentTxns.map(b => ( 
@@ -1045,9 +933,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                                             <span className="text-[10px] text-gray-500">C: ₹{b.split_cash} | O: ₹{b.split_online}</span>
                                                         </div>
                                                     ) : (
-                                                        <span className={`px-2 py-1 rounded text-xs font-bold ${b.payment_method === 'Online' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>
-                                                            {b.payment_method || 'Cash'}
-                                                        </span>
+                                                        <span className={`px-2 py-1 rounded text-xs font-bold ${b.payment_method === 'Online' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>{b.payment_method || 'Cash'}</span>
                                                     )}
                                                 </td>
                                             </tr> 
@@ -1090,7 +976,7 @@ export default function RoomManagement({ appMode, toggleMode }) {
 
                     {/* TAB 5: ROOM REGISTRY */}
                     {activeTab === 'users' && (
-                        <div className="max-w-7xl mx-auto w-full">
+                        <div className="max-w-7xl mx-auto w-full pb-10">
                             <h2 className="text-2xl font-bold mb-6 text-yellow-500">Booking Registry & Guest History</h2>
                             <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full overflow-x-auto shadow-lg">
                                 <table className="w-full text-left text-sm text-gray-400 min-w-[1000px]">
@@ -1138,6 +1024,30 @@ export default function RoomManagement({ appMode, toggleMode }) {
                                         {bookings.length === 0 && <tr><td colSpan="6" className="text-center py-10 text-gray-500">No room registry history found.</td></tr>}
                                     </tbody>
                                 </table>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* TAB 6: SETTINGS */}
+                    {activeTab === 'settings' && (
+                        <div className="max-w-4xl mx-auto w-full pb-10">
+                            <h2 className="text-2xl font-bold mb-6 text-yellow-500">Room Settings</h2>
+                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg">
+                                <h3 className="text-lg font-bold mb-4">Pricing Configuration (Per 1-Hour Slot)</h3>
+                                <p className="text-sm text-gray-400 mb-6">Set the default base price for each room. This price will automatically be applied when a room is selected during the booking process.</p>
+                                <form onSubmit={handleSaveSettings} className="space-y-4">
+                                    <div className="flex flex-col md:flex-row gap-4">
+                                        <div className="flex-1">
+                                            <label className="text-xs text-gray-400 uppercase font-bold tracking-wider block mb-1">Room 1 Base Price (₹)</label>
+                                            <input type="number" min="0" className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-white focus:border-yellow-500 outline-none" value={roomPrices['Room 1'] || ''} onChange={e => setRoomPrices({...roomPrices, 'Room 1': Number(e.target.value)})} required />
+                                        </div>
+                                        <div className="flex-1">
+                                            <label className="text-xs text-gray-400 uppercase font-bold tracking-wider block mb-1">Room 2 Base Price (₹)</label>
+                                            <input type="number" min="0" className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-white focus:border-yellow-500 outline-none" value={roomPrices['Room 2'] || ''} onChange={e => setRoomPrices({...roomPrices, 'Room 2': Number(e.target.value)})} required />
+                                        </div>
+                                    </div>
+                                    <button type="submit" className="w-full md:w-auto bg-yellow-500 hover:bg-yellow-400 text-black font-bold px-8 py-3 rounded-lg transition shadow-lg mt-4">Save Prices</button>
+                                </form>
                             </div>
                         </div>
                     )}

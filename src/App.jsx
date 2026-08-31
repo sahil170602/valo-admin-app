@@ -6,6 +6,9 @@ import { App } from '@capacitor/app';
 import OneSignal from '@onesignal/capacitor-plugin';
 import { Filesystem } from '@capacitor/filesystem';
 import RoomManagement from './RoomManagement';
+import { LocalNotifications } from '@capacitor/local-notifications';
+
+
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
 const getFormattedDate = (dateObj = new Date()) => {
     const d = String(dateObj.getDate()).padStart(2, '0');
