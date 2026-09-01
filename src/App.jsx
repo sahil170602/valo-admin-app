@@ -1405,8 +1405,19 @@ const handleSaveMissingItem = async (e) => {
             if (updates.splitAmounts) parts.push(`split ₹${updates.splitAmounts.cash || 0} / ₹${updates.splitAmounts.online || 0}`);
             await logOrderActivity(id, 'PAYMENT_UPDATED', `Payment updated (${parts.join(', ')}).`);
         }
-        if (!added.length && !removed.length && updates.status === undefined && updates.paymentMethod === undefined && updates.paymentStatus === undefined && updates.splitAmounts === undefined) {
-            await logOrderActivity(id, 'ORDER_UPDATED', 'Order details updated.');
+        if (
+            !added.length &&
+            !removed.length &&
+            updates.status === undefined &&
+            updates.paymentMethod === undefined &&
+            updates.paymentStatus === undefined &&
+            updates.splitAmounts === undefined
+        ) {
+            await logOrderActivity(
+                id,
+                'ORDER_UPDATED',
+                `Order #${id} details updated.`
+            );
         }
 
         setOrders(prev => prev.map(order => order.id === id ? { ...order, ...newDetails, id, status: dbPayload.status, total: dbPayload.total !== undefined ? dbPayload.total : current.total } : order));
@@ -3561,7 +3572,36 @@ const handleCreateBill = async () => {
                                             <div className="min-w-0">
                                                 <div className="flex items-center gap-2 flex-wrap">
                                                     <span className="font-bold text-white">{row.operator_name || 'Unknown'}</span>
-                                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-400 font-bold uppercase">{row.action || 'UPDATED'}</span>
+                                                    {row.operator_role && (
+                                                        <span className="text-[9px] text-gray-500 uppercase font-bold">
+                                                            {row.operator_role}
+                                                        </span>
+                                                    )}
+                                                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
+                                                        row.action === 'ITEM_ADDED'
+                                                            ? 'bg-green-500/15 text-green-400'
+                                                            : row.action === 'ITEM_REMOVED'
+                                                                ? 'bg-red-500/15 text-red-400'
+                                                                : row.action === 'COMPLETED'
+                                                                    ? 'bg-blue-500/15 text-blue-400'
+                                                                    : row.action === 'PAYMENT_UPDATED'
+                                                                        ? 'bg-purple-500/15 text-purple-400'
+                                                                        : row.action === 'STATUS_CHANGED'
+                                                                            ? 'bg-yellow-500/15 text-yellow-400'
+                                                                            : 'bg-cyan-500/15 text-cyan-400'
+                                                    }`}>
+                                                        {row.action === 'ITEM_ADDED'
+                                                            ? 'Item Added'
+                                                            : row.action === 'ITEM_REMOVED'
+                                                                ? 'Item Removed'
+                                                                : row.action === 'COMPLETED'
+                                                                    ? 'Order Completed'
+                                                                    : row.action === 'PAYMENT_UPDATED'
+                                                                        ? 'Payment Updated'
+                                                                        : row.action === 'STATUS_CHANGED'
+                                                                            ? 'Status Changed'
+                                                                            : 'Order Updated'}
+                                                    </span>
                                                 </div>
                                                 <p className="text-sm text-gray-300 mt-2 break-words">{row.description || 'Order updated.'}</p>
                                             </div>
