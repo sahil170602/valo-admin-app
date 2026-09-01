@@ -120,124 +120,45 @@ const sendAdminNotification = async (title, body) => {
 
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
-    const [showGate, setShowGate] = useState(true);
-    
-    // --- MODE SWITCH STATE ---
+    const [operator, setOperator] = useState(() => {
+        try { const raw = sessionStorage.getItem('valo_operator'); return raw ? JSON.parse(raw) : null; }
+        catch { return null; }
+    });
+    const [showGate, setShowGate] = useState(() => {
+        try { return !sessionStorage.getItem('valo_operator'); }
+        catch { return true; }
+    });
     const [appMode, setAppMode] = useState(() => localStorage.getItem('valo_app_mode') || 'food');
-
     const toggleMode = () => {
         const newMode = appMode === 'food' ? 'room' : 'food';
         setAppMode(newMode);
         localStorage.setItem('valo_app_mode', newMode);
     };
-   useEffect(() => {
-        let foregroundListener = null;
-        let clickListener = null;
-        let nativeApi = null;
-
-        const getNativeOneSignal = () => {
-            if (OneSignal && (OneSignal.initialize || OneSignal.setAppId)) return OneSignal;
-            if (window.plugins && window.plugins.OneSignal) return window.plugins.OneSignal;
-            return null;
+    const handleAccess = (operatorInfo) => {
+        const normalized = {
+            id: operatorInfo?.id ?? null,
+            name: String(operatorInfo?.name || 'Admin').trim() || 'Admin',
+            role: operatorInfo?.role === 'staff' ? 'staff' : 'admin'
         };
-
-        const setupPush = async () => {
-            if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-                try {
-                    nativeApi = getNativeOneSignal();
-                    if (!nativeApi) {
-                        console.error('OneSignal native plugin is not available.');
-                        return;
-                    }
-
-                    if (typeof nativeApi.initialize === 'function') {
-                        nativeApi.initialize('3a997ca5-9d8f-4e81-8943-907b81b9a577');
-
-                        if (nativeApi.Notifications && typeof nativeApi.Notifications.addEventListener === 'function') {
-                            foregroundListener = (event) => {
-                                try {
-                                    const notification = event.getNotification?.();
-                                    if (event.preventDefault) event.preventDefault();
-                                    if (notification?.display) notification.display();
-                                } catch (err) {
-                                    console.error('OneSignal foreground notification error:', err);
-                                }
-                            };
-                            nativeApi.Notifications.addEventListener('foregroundWillDisplay', foregroundListener);
-
-                            clickListener = (event) => {
-                                console.log('OneSignal notification clicked:', event);
-                            };
-                            nativeApi.Notifications.addEventListener('click', clickListener);
-                        }
-                    } else if (typeof nativeApi.setAppId === 'function') {
-                        nativeApi.setAppId('3a997ca5-9d8f-4e81-8943-907b81b9a577');
-                    }
-                } catch (err) {
-                    console.error('OneSignal native initialization error:', err);
-                }
-                return;
-            }
-
-            try {
-                if (window.OneSignalInitialized) return;
-                window.OneSignalInitialized = true;
-                window.OneSignalDeferred = window.OneSignalDeferred || [];
-                window.OneSignalDeferred.push(async function (WebOneSignal) {
-                    try {
-                        await WebOneSignal.init({
-                            appId: '3a997ca5-9d8f-4e81-8943-907b81b9a577',
-                            safari_web_id: 'web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65',
-                            notifyButton: { enable: true },
-                            allowLocalhostAsSecureOrigin: true
-                        });
-                    } catch (err) {
-                        console.log('OneSignal web initialization skipped:', err);
-                    }
-                });
-            } catch (err) {
-                console.error('OneSignal web setup error:', err);
-            }
-        };
-
-        setupPush();
-
-        return () => {
-            try {
-                if (nativeApi?.Notifications?.removeEventListener) {
-                    if (foregroundListener) nativeApi.Notifications.removeEventListener('foregroundWillDisplay', foregroundListener);
-                    if (clickListener) nativeApi.Notifications.removeEventListener('click', clickListener);
-                }
-            } catch (err) {
-                console.error('OneSignal listener cleanup error:', err);
-            }
-        };
-    }, []);
-
-    useEffect(() => {
-        const timer = setTimeout(() => { setIsLoading(false); }, 3000);
-        return () => clearTimeout(timer);
-    }, []);
-
-   const handleAccess = (isUnlocked) => {
-        if (isUnlocked) {
-            localStorage.setItem('valo_unlocked', 'true');
-        } else {
-            localStorage.setItem('valo_unlocked', 'false');
-        }
+        sessionStorage.setItem('valo_operator', JSON.stringify(normalized));
+        setOperator(normalized);
         setShowGate(false);
     };
-
+    const handleSwitchOperator = () => {
+        sessionStorage.removeItem('valo_operator');
+        setOperator(null);
+        setShowGate(true);
+    };
+    useEffect(() => { const timer = setTimeout(() => setIsLoading(false), 3000); return () => clearTimeout(timer); }, []);
     if (isLoading) return <SplashScreen />;
-    if (showGate) return <AdminLogin onAccess={handleAccess} />;
-
-    // Pass the state and toggle function down to the dashboards
+    if (showGate || !operator) return <AdminLogin onAccess={handleAccess} />;
     return appMode === 'food' ? (
-        <AdminDashboard appMode={appMode} toggleMode={toggleMode} />
+        <AdminDashboard appMode={appMode} toggleMode={toggleMode} operator={operator} onSwitchOperator={handleSwitchOperator} />
     ) : (
         <RoomManagement appMode={appMode} toggleMode={toggleMode} />
     );
 }
+
 // --- SPLASH SCREEN ---
 function SplashScreen() {
     const logoUrl = '/logo.png'; 
@@ -258,57 +179,89 @@ function SplashScreen() {
 }
 
 function AdminLogin({ onAccess }) {
-    const [pin, setPin] = useState("");
+    const [mode, setMode] = useState('main');
+    const [pin, setPin] = useState('');
+    const [staffPin, setStaffPin] = useState('');
+    const [staffMembers, setStaffMembers] = useState([]);
+    const [selectedStaffId, setSelectedStaffId] = useState('');
     const [error, setError] = useState(false);
     const [isVerifying, setIsVerifying] = useState(false);
     const logoUrl = '/logo.png';
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
+    const loadStaffMembers = async () => {
         setIsVerifying(true);
-        
-        const { data, error: dbError } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
-        const currentPin = data ? data.admin_pin : '6748'; 
+        const { data, error: dbError } = await supabase.from('staff_accounts').select('id, name, active').eq('active', true).order('name', { ascending: true });
+        setIsVerifying(false);
+        if (dbError) { console.error('Staff account load error:', dbError); alert('Staff accounts are not available yet. Run the staff_accounts SQL setup first.'); return; }
+        const rows = Array.isArray(data) ? data : [];
+        setStaffMembers(rows);
+        setSelectedStaffId(rows[0]?.id ? String(rows[0].id) : '');
+        setStaffPin('');
+        setMode('staff');
+    };
 
-        if (pin === currentPin) {
-            onAccess(true); 
+    const handleAdminSubmit = async (e) => {
+        e.preventDefault();
+        if (!pin) return;
+        setIsVerifying(true);
+        const { data, error: dbError } = await supabase.from('app_settings').select('admin_pin').eq('id', 1).single();
+        const currentPin = data ? String(data.admin_pin) : '6748';
+        if (!dbError && pin === currentPin) {
+            setError(false);
+            onAccess({ id: null, name: 'Admin', role: 'admin' });
         } else {
-            setError(true); 
-            setPin("");
-            setTimeout(() => setError(false), 500);
+            setError(true); setPin(''); setTimeout(() => setError(false), 600);
         }
         setIsVerifying(false);
     };
-    
+
+    const handleStaffSubmit = async (e) => {
+        e.preventDefault();
+        if (!selectedStaffId || !staffPin) return;
+        setIsVerifying(true);
+        const { data, error: dbError } = await supabase.from('staff_accounts').select('id, name, pin, active').eq('id', Number(selectedStaffId)).eq('active', true).single();
+        if (dbError || !data || String(data.pin) !== String(staffPin)) {
+            setError(true); setStaffPin(''); setTimeout(() => setError(false), 600); setIsVerifying(false); return;
+        }
+        setError(false); setIsVerifying(false);
+        onAccess({ id: data.id, name: data.name, role: 'staff' });
+    };
+
     return (
         <div className="min-h-screen bg-[#0f172a] flex flex-col items-center justify-center p-4">
-            <div className={`w-full max-w-sm bg-slate-800 border border-white/10 p-10 rounded-[3rem] shadow-2xl text-center transition-all ${error ? 'animate-shake border-red-500' : ''}`}>
-                <div className="w-28 h-28 bg-white  rounded-3xl mx-auto flex items-center justify-center mb-8 shadow-xl border border-white/5 relative">
-                     <img src={logoUrl} alt="Logo" className="w-28 h-28 object-contain" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.style.display = 'none'; }} />
+            <div className={`w-full max-w-sm bg-slate-800 border border-white/10 p-8 rounded-[2.5rem] shadow-2xl text-center transition-all ${error ? 'animate-shake border-red-500' : ''}`}>
+                <div className="w-24 h-24 bg-white rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-xl border border-white/5 relative">
+                    <img src={logoUrl} alt="Logo" className="w-24 h-24 object-contain" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.style.display = 'none'; }} />
                 </div>
-                <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">Access Locked</h2>
-                
-                <form onSubmit={handleSubmit} className="space-y-4">
-                    <input type="password" value={pin} onChange={(e) => setPin(e.target.value)} autoComplete="new-password" placeholder="••••" maxLength="4" autoFocus disabled={isVerifying} className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-5 text-center text-white text-3xl tracking-[0em] focus:outline-none focus:border-cyan-500 transition-all disabled:opacity-50" />
-                    
-                    <button type="submit" disabled={isVerifying} className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 text-md tracking-wide disabled:opacity-50">
-                        {isVerifying ? 'Verifying...' : 'Verify PIN (Admin)'}
-                    </button>
-                    
-                    <button type="button" onClick={() => onAccess(false)} disabled={isVerifying} className="w-full bg-slate-700 text-white font-bold py-4 rounded-2xl hover:bg-slate-600 transition-all shadow-lg active:scale-95 text-sm tracking-wide mt-2 disabled:opacity-50">
-                        Continue Restricted (Staff)
-                    </button>
-                </form>
+                <h2 className="text-2xl font-bold text-white mb-1 uppercase tracking-tight">{mode === 'main' ? 'Operator Access' : 'Select Operator'}</h2>
+                <p className="text-xs text-gray-500 mb-6">{mode === 'main' ? 'Choose how you want to enter VALO Admin.' : 'Choose your name and enter your personal PIN.'}</p>
+                {mode === 'main' && (<>
+                    <form onSubmit={handleAdminSubmit} className="space-y-4">
+                        <input type="password" value={pin} onChange={e => setPin(e.target.value.replace(/\D/g,''))} autoComplete="new-password" placeholder="Admin PIN" maxLength="4" autoFocus disabled={isVerifying} className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-4 text-center text-white text-2xl tracking-[0.45em] focus:outline-none focus:border-cyan-500 transition-all disabled:opacity-50" />
+                        <button type="submit" disabled={isVerifying || pin.length === 0} className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-black font-black py-4 rounded-2xl hover:opacity-90 transition-all shadow-lg active:scale-95 disabled:opacity-50">{isVerifying ? 'Checking...' : 'Admin Access'}</button>
+                    </form>
+                    <button type="button" onClick={loadStaffMembers} disabled={isVerifying} className="w-full mt-3 bg-slate-700 text-white font-bold py-4 rounded-2xl hover:bg-slate-600 transition-all shadow-lg active:scale-95 disabled:opacity-50">Continue as Staff</button>
+                </>)}
+                {mode === 'staff' && (<form onSubmit={handleStaffSubmit} className="space-y-4">
+                    {staffMembers.length === 0 ? <div className="bg-black/20 border border-white/10 rounded-xl p-4 text-sm text-gray-400">No staff operators have been added yet. Sign in as Admin and add them in Settings.</div> : <>
+                        <select value={selectedStaffId} onChange={e => setSelectedStaffId(e.target.value)} disabled={isVerifying} className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-4 text-white focus:outline-none focus:border-cyan-500">{staffMembers.map(staff => <option key={staff.id} value={staff.id}>{staff.name}</option>)}</select>
+                        <input type="password" value={staffPin} onChange={e => setStaffPin(e.target.value.replace(/\D/g,''))} autoComplete="new-password" placeholder="Personal PIN" maxLength="4" autoFocus disabled={isVerifying} className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-4 text-center text-white text-2xl tracking-[0.45em] focus:outline-none focus:border-cyan-500 transition-all disabled:opacity-50" />
+                        <button type="submit" disabled={isVerifying || !selectedStaffId || staffPin.length === 0} className="w-full bg-cyan-500 text-black font-black py-4 rounded-2xl hover:bg-cyan-400 transition-all shadow-lg active:scale-95 disabled:opacity-50">{isVerifying ? 'Checking...' : 'Continue'}</button>
+                    </>}
+                    <button type="button" onClick={() => { setMode('main'); setStaffPin(''); setError(false); }} disabled={isVerifying} className="w-full bg-white/5 text-gray-300 font-bold py-3 rounded-xl hover:bg-white/10 transition disabled:opacity-50">Back</button>
+                </form>)}
             </div>
         </div>
     );
 }
-function AdminDashboard({ appMode, toggleMode }) {
+
+function AdminDashboard({ appMode, toggleMode, operator, onSwitchOperator }) {
     const [activeTab, setActiveTab] = useState('orders');
      const [opsTab, setOpsTab] = useState('staff');
     
     // --- TAB-LEVEL SECURITY STATES ---
-    const [isUnlocked, setIsUnlocked] = useState(() => localStorage.getItem('valo_unlocked') === 'true');
+    const [isUnlocked, setIsUnlocked] = useState(() => operator?.role === 'admin' || localStorage.getItem('valo_unlocked') === 'true');
+    useEffect(() => { setIsUnlocked(operator?.role === 'admin'); }, [operator?.role]);
     const [pinModalOpen, setPinModalOpen] = useState(false);
     const [targetTab, setTargetTab] = useState(null);
     // Add this state
@@ -428,7 +381,15 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
     const [historyItemSearch, setHistoryItemSearch] = useState(''); 
     const [historyItemForm, setHistoryItemForm] = useState({ name: '', price: '', qty: 1, menuId: null, invId: null, isInv: false });
     const [historyItemSugg, setHistoryItemSugg] = useState(false);
-    const [inventorySearchQuery, setInventorySearchQuery] = useState(''); 
+    const [inventorySearchQuery, setInventorySearchQuery] = useState('');
+    const [inventoryWhatsAppModal, setInventoryWhatsAppModal] = useState(false);
+
+    // --- OPERATOR / AUDIT TRAIL ---
+    const currentOperator = operator || { id: null, name: 'Admin', role: 'admin' };
+    const [orderActivityModal, setOrderActivityModal] = useState({ open: false, orderId: null, orderLabel: '', rows: [], loading: false });
+    const [staffAccounts, setStaffAccounts] = useState([]);
+    const [staffAccountForm, setStaffAccountForm] = useState({ id: null, name: '', pin: '' });
+    const [staffAccountSaving, setStaffAccountSaving] = useState(false); 
     const [personalWaNumber, setPersonalWaNumber] = useState(() => localStorage.getItem('personal_wa_number') || '');
     const [isEditingWa, setIsEditingWa] = useState(false);
     const [purchaseSearchQuery, setPurchaseSearchQuery] = useState('');
@@ -446,6 +407,129 @@ const audioRef = useRef(null);
 
 // --- SMART LOW STOCK NOTIFICATION ENGINE ---
 const prevInvRef = useRef({});
+
+// ============================================================
+// WHATSAPP INVENTORY REPORT
+// Opens WhatsApp directly on Android APK
+// Falls back to wa.me on browser/PWA
+// ============================================================
+const openWhatsAppReport = (message) => {
+    const phone = '917972506748';
+    const encodedMessage = encodeURIComponent(message);
+
+    const whatsappAppUrl =
+        `whatsapp://send?phone=${phone}&text=${encodedMessage}`;
+
+    const whatsappWebUrl =
+        `https://wa.me/${phone}?text=${encodedMessage}`;
+
+    if (Capacitor.isNativePlatform()) {
+        try {
+            // Android: open WhatsApp app
+            window.location.href = whatsappAppUrl;
+
+            // Fallback if WhatsApp is not installed
+            setTimeout(() => {
+                window.location.href = whatsappWebUrl;
+            }, 1500);
+
+            return;
+        } catch (error) {
+            console.error('WhatsApp open error:', error);
+            window.location.href = whatsappWebUrl;
+        }
+    } else {
+        // Browser / PWA / Safari
+        window.location.href = whatsappWebUrl;
+    }
+};
+
+// ============================================================
+// ATOMIC INVENTORY STOCK ADJUSTMENT
+// Positive delta = add/return stock
+// Negative delta = consume stock
+// ============================================================
+const adjustInventoryStock = async (inventoryId, delta) => {
+    if (!inventoryId || !delta) return null;
+
+    const { data, error } = await supabase.rpc('adjust_inventory_stock', {
+        p_inventory_id: inventoryId,
+        p_delta: Number(delta)
+    });
+
+    if (error) {
+        console.error('Inventory adjustment error:', error);
+        alert(error.message || 'Unable to update inventory stock.');
+        return null;
+    }
+
+    const newStock = Number(data);
+
+    setInventoryItems(prev => prev.map(item =>
+        item.id === inventoryId ? { ...item, stock: newStock } : item
+    ));
+
+    return newStock;
+};
+
+// Serialize live-order mutations per order so rapid + / - clicks cannot
+// overwrite one another with stale React state.
+const orderMutationLocks = useRef(new Map());
+
+const withOrderMutationLock = async (orderId, operation) => {
+    const previous = orderMutationLocks.current.get(orderId) || Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    orderMutationLocks.current.set(orderId, current);
+
+    try {
+        return await current;
+    } finally {
+        if (orderMutationLocks.current.get(orderId) === current) {
+            orderMutationLocks.current.delete(orderId);
+        }
+    }
+};
+
+// ============================================================
+// OPERATOR AUDIT TRAIL
+// ============================================================
+const logOrderActivity = async (orderId, action, description) => {
+    if (!orderId) return;
+    const { error } = await supabase.from('order_activity_log').insert([{
+        order_id: orderId,
+        operator_id: currentOperator.id,
+        operator_name: currentOperator.name || 'Unknown',
+        operator_role: currentOperator.role || 'staff',
+        action,
+        description: description || '',
+        created_at: new Date().toISOString()
+    }]);
+    if (error) console.error('Order audit log error:', error);
+};
+
+const openOrderActivity = async (order) => {
+    setOrderActivityModal({ open: true, orderId: order.id, orderLabel: order.displayId || order.id, rows: [], loading: true });
+    const { data, error } = await supabase.from('order_activity_log').select('*').eq('order_id', order.id).order('created_at', { ascending: false }).limit(100);
+    if (error) {
+        console.error('Activity load error:', error);
+        setOrderActivityModal(prev => ({ ...prev, rows: [], loading: false }));
+        return;
+    }
+    setOrderActivityModal(prev => ({ ...prev, rows: Array.isArray(data) ? data : [], loading: false }));
+};
+
+const buildOperatorMeta = (details = {}, isNew = false) => ({
+    ...details,
+    ...(isNew && !details.created_by_name ? {
+        created_by_name: currentOperator.name,
+        created_by_id: currentOperator.id,
+        created_by_role: currentOperator.role
+    } : {}),
+    last_updated_by_name: currentOperator.name,
+    last_updated_by_id: currentOperator.id,
+    last_updated_by_role: currentOperator.role,
+    last_updated_at: new Date().toISOString()
+});
 
 
 // ============================================================
@@ -481,7 +565,13 @@ useEffect(() => {
                 return;
             }
 
-            // 4. CLOSE PAYMENT MODAL
+            // 4. CLOSE ORDER ACTIVITY MODAL
+            if (orderActivityModal.open) {
+                setOrderActivityModal({ open: false, orderId: null, orderLabel: '', rows: [], loading: false });
+                return;
+            }
+
+            // 5. CLOSE PAYMENT MODAL
             if (adminPaymentModal.open) {
                 setAdminPaymentModal({
                     open: false,
@@ -613,6 +703,7 @@ useEffect(() => {
     createBillModal,
     viewOrderDetails,
     editHistoryModal,
+    orderActivityModal,
     adminPaymentModal,
     itemModal,
     catModal,
@@ -747,6 +838,8 @@ useEffect(() => {
         return () => { supabase.removeChannel(channel); stopAlert(); };
     }, []);
 
+    useEffect(() => { if (currentOperator.role === 'admin' && activeTab === 'settings') fetchStaffAccounts(); }, [activeTab, currentOperator.role]);
+
   const handleSaveCategory = async (e) => {
         e.preventDefault();
         const form = new FormData(e.target);
@@ -873,21 +966,198 @@ useEffect(() => {
 
   const handleSaveInventory = async (e) => {
     e.preventDefault();
+
     const form = new FormData(e.target);
-    const payload = {
-        name: form.get('name'),
-        category: form.get('category'), // Captures Food or Inventory
-        barcode: form.get('barcode'),
-        stock: Number(form.get('stock')),
-        price: Number(form.get('price'))
-    };
-    if (invModal.mode === 'add') {
-        await supabase.from('inventory_items').insert([payload]);
-    } else {
-        await supabase.from('inventory_items').update(payload).eq('id', invModal.data.id);
+    const newName = String(form.get('name') || '').trim();
+    const newCategory = String(form.get('category') || 'Inventory').trim();
+    const newBarcode = String(form.get('barcode') || '').trim();
+    const newStock = Number(form.get('stock'));
+    const newPrice = Number(form.get('price'));
+
+    if (!newName) {
+        alert('Item name is required.');
+        return;
     }
-    setInvModal({open: false, mode: 'add', data: null});
-    fetchData();
+
+    if (!Number.isFinite(newStock) || newStock < 0) {
+        alert('Stock must be 0 or greater.');
+        return;
+    }
+
+    if (!Number.isFinite(newPrice) || newPrice < 0) {
+        alert('Price must be 0 or greater.');
+        return;
+    }
+
+    const payload = {
+        name: newName,
+        category: newCategory,
+        barcode: newBarcode,
+        stock: newStock,
+        price: newPrice
+    };
+
+    // ============================================================
+    // ADD NEW INVENTORY ITEM
+    // ============================================================
+    if (invModal.mode === 'add') {
+        const { error } = await supabase
+            .from('inventory_items')
+            .insert([payload]);
+
+        if (error) {
+            console.error('Inventory insert error:', error);
+            alert(error.message || 'Could not add inventory item.');
+            return;
+        }
+
+        setInvModal({ open: false, mode: 'add', data: null });
+        await fetchData();
+        return;
+    }
+
+    // ============================================================
+    // EDIT EXISTING INVENTORY ITEM
+    // ============================================================
+    const inventoryId = invModal.data?.id;
+    const oldName = String(invModal.data?.name || '').trim();
+
+    if (!inventoryId) {
+        alert('Inventory item ID is missing.');
+        return;
+    }
+
+    const { error: inventoryUpdateError } = await supabase
+        .from('inventory_items')
+        .update(payload)
+        .eq('id', inventoryId);
+
+    if (inventoryUpdateError) {
+        console.error('Inventory update error:', inventoryUpdateError);
+        alert(inventoryUpdateError.message || 'Could not update inventory item.');
+        return;
+    }
+
+    // ============================================================
+    // SYNC RENAMED INVENTORY ITEM INTO OLD BILLS / ORDERS
+    // ============================================================
+    if (oldName !== newName) {
+        try {
+            const { data: allOrders, error: ordersFetchError } = await supabase
+                .from('orders')
+                .select('id, order_details, item_names');
+
+            if (ordersFetchError) {
+                console.error('Could not load orders for name sync:', ordersFetchError);
+                alert(
+                    `Inventory item was renamed, but old bills could not be synchronized.\n\n${ordersFetchError.message}`
+                );
+            } else if (Array.isArray(allOrders) && allOrders.length > 0) {
+                const changedOrderRows = [];
+
+                for (const orderRow of allOrders) {
+                    const details = orderRow?.order_details || {};
+                    const customItems = Array.isArray(details.customItems)
+                        ? details.customItems
+                        : [];
+
+                    let changed = false;
+
+                    const updatedCustomItems = customItems.map(item => {
+                        if (!item || !item.isInv) return item;
+
+                        const sameInventoryId =
+                            item.invId !== null &&
+                            item.invId !== undefined &&
+                            String(item.invId) === String(inventoryId);
+
+                        // Fallback for very old records that may not have invId.
+                        const legacyNameMatch =
+                            (item.invId === null || item.invId === undefined) &&
+                            String(item.name || '').trim() === oldName;
+
+                        if (sameInventoryId || legacyNameMatch) {
+                            changed = true;
+                            return {
+                                ...item,
+                                name: newName
+                            };
+                        }
+
+                        return item;
+                    });
+
+                    if (!changed) continue;
+
+                    const updatedDetails = {
+                        ...details,
+                        customItems: updatedCustomItems
+                    };
+
+                    const updatedItemNames = generateItemNamesString(
+                        updatedDetails.items,
+                        updatedDetails.customItems
+                    );
+
+                    const { error: orderUpdateError } = await supabase
+                        .from('orders')
+                        .update({
+                            order_details: updatedDetails,
+                            item_names: updatedItemNames
+                        })
+                        .eq('id', orderRow.id);
+
+                    if (orderUpdateError) {
+                        console.error(
+                            `Could not synchronize Order #${orderRow.id}:`,
+                            orderUpdateError
+                        );
+                        continue;
+                    }
+
+                    changedOrderRows.push({
+                        id: orderRow.id,
+                        order_details: updatedDetails,
+                        item_names: updatedItemNames
+                    });
+                }
+
+                // Update the currently displayed order/history data immediately.
+                if (changedOrderRows.length > 0) {
+                    const changedById = new Map(
+                        changedOrderRows.map(row => [row.id, row])
+                    );
+
+                    setOrders(prev => prev.map(order => {
+                        const changed = changedById.get(order.id);
+                        if (!changed) return order;
+
+                        return {
+                            ...order,
+                            ...changed.order_details,
+                            id: order.id,
+                            status: order.status,
+                            tableNo: order.tableNo,
+                            total: order.total,
+                            item_names: changed.item_names
+                        };
+                    }));
+
+                    console.log(
+                        `Inventory rename synced to ${changedOrderRows.length} old bill(s).`
+                    );
+                }
+            }
+        } catch (syncError) {
+            console.error('Inventory name synchronization error:', syncError);
+            alert(
+                'Inventory item was renamed, but some old bills may not have been synchronized. Check the console for details.'
+            );
+        }
+    }
+
+    setInvModal({ open: false, mode: 'add', data: null });
+    await fetchData();
 };
 
     const deleteInventoryItem = async (id) => {
@@ -928,7 +1198,8 @@ const handleSaveStaffExpense = async (e) => {
                 alert("Not enough stock in inventory!");
                 return;
             }
-            await supabase.from('inventory_items').update({ stock: invItem.stock - payload.qty }).eq('id', invItem.id);
+            const newStock = await adjustInventoryStock(invItem.id, -Number(payload.qty));
+            if (newStock === null) return;
         }
     }
 
@@ -978,7 +1249,8 @@ const handleSaveMissingItem = async (e) => {
                     alert("Not enough stock in inventory!");
                     return;
                 }
-                await supabase.from('inventory_items').update({ stock: invItem.stock - payload.qty }).eq('id', invItem.id);
+                const newStock = await adjustInventoryStock(invItem.id, -Number(payload.qty));
+            if (newStock === null) return;
             }
         }
 
@@ -1023,15 +1295,15 @@ const handleSaveMissingItem = async (e) => {
         if (payload.inv_id) {
             const invItem = inventoryItems.find(i => i.id === payload.inv_id);
             if (invItem) {
-                const newStockAmount = Number(invItem.stock) + Number(payload.qty);
-                await supabase.from('inventory_items').update({ stock: newStockAmount }).eq('id', invItem.id);
+                const newStockAmount = await adjustInventoryStock(invItem.id, Number(payload.qty));
+                if (newStockAmount === null) return;
             }
         } else {
             // Check if inventory item exists by name, else insert new inventory item
             const existingItem = inventoryItems.find(i => i.name.toLowerCase() === payload.item_name.toLowerCase());
             if (existingItem) {
-                const newStockAmount = Number(existingItem.stock) + Number(payload.qty);
-                await supabase.from('inventory_items').update({ stock: newStockAmount }).eq('id', existingItem.id);
+                const newStockAmount = await adjustInventoryStock(existingItem.id, Number(payload.qty));
+                if (newStockAmount === null) return;
             } else {
                 await supabase.from('inventory_items').insert([{
                     name: payload.item_name,
@@ -1080,23 +1352,94 @@ const handleSaveMissingItem = async (e) => {
     };
 
     const updateOrder = async (id, updates) => {
-        const newOrders = orders.map(o => o.id === id ? { ...o, ...updates } : o);
-        setOrders(newOrders);
-        if (!newOrders.some(o => o.status === 'Received')) stopAlert();
+        const { data: current, error: fetchError } = await supabase.from('orders').select('order_details, total, status').eq('id', id).single();
+        if (fetchError) return { error: fetchError };
+        if (!current) return { error: new Error('Order not found.') };
 
-        const { data: current } = await supabase.from('orders').select('order_details, total, status').eq('id', id).single();
-        if(current) {
-            const newDetails = { ...current.order_details, ...updates };
-            const dbPayload = { 
-                status: updates.status || current.status, 
-                order_details: newDetails,
-                item_names: generateItemNamesString(newDetails.items, newDetails.customItems) 
-            };
-            if (updates.total !== undefined) {
-                dbPayload.total = updates.total;
-            }
-            await supabase.from('orders').update(dbPayload).eq('id', id);
+        const oldDetails = current.order_details || {};
+        const oldItems = oldDetails.items || {};
+        const oldCustomItems = Array.isArray(oldDetails.customItems) ? oldDetails.customItems : [];
+        const newDetails = buildOperatorMeta({ ...oldDetails, ...updates });
+        const newItems = newDetails.items || {};
+        const newCustomItems = Array.isArray(newDetails.customItems) ? newDetails.customItems : [];
+        const added = [], removed = [];
+
+        Object.entries(newItems).forEach(([menuId, qty]) => {
+            const diff = Number(qty || 0) - Number(oldItems[menuId] || 0);
+            if (!diff) return;
+            const mItem = menuItems.find(item => item.id === parseInt(menuId));
+            const name = mItem?.name || 'Menu Item';
+            if (diff > 0) added.push(`${name} ×${diff}`); else removed.push(`${name} ×${Math.abs(diff)}`);
+        });
+
+        const oldById = new Map(oldCustomItems.map(item => [String(item.id), item]));
+        const newById = new Map(newCustomItems.map(item => [String(item.id), item]));
+        newCustomItems.forEach(item => {
+            const diff = Number(item.qty || 0) - Number(oldById.get(String(item.id))?.qty || 0);
+            if (diff > 0) added.push(`${item.name || 'Item'} ×${diff}`);
+            if (diff < 0) removed.push(`${item.name || 'Item'} ×${Math.abs(diff)}`);
+        });
+        oldCustomItems.forEach(item => {
+            if (!newById.has(String(item.id)) && Number(item.qty || 0) > 0) removed.push(`${item.name || 'Item'} ×${Number(item.qty || 0)}`);
+        });
+
+        const dbPayload = {
+            status: updates.status || current.status,
+            order_details: newDetails,
+            item_names: generateItemNamesString(newDetails.items, newDetails.customItems)
+        };
+        if (updates.total !== undefined) dbPayload.total = updates.total;
+
+        const { error } = await supabase.from('orders').update(dbPayload).eq('id', id);
+        if (error) return { error };
+
+        if (added.length) await logOrderActivity(id, 'ITEM_ADDED', `${added.join(', ')} added to Order #${id}.`);
+        if (removed.length) await logOrderActivity(id, 'ITEM_REMOVED', `${removed.join(', ')} removed from Order #${id}.`);
+        if (updates.status !== undefined && String(updates.status) !== String(current.status)) {
+            await logOrderActivity(id, updates.status === 'Picked Up' ? 'COMPLETED' : 'STATUS_CHANGED', updates.status === 'Picked Up' ? `Order #${id} completed.` : `Status changed from ${current.status || 'Unknown'} to ${updates.status}.`);
         }
+        if (updates.paymentMethod !== undefined || updates.paymentStatus !== undefined || updates.splitAmounts !== undefined) {
+            const parts = [];
+            if (updates.paymentStatus !== undefined) parts.push(`status: ${updates.paymentStatus}`);
+            if (updates.paymentMethod !== undefined) parts.push(`method: ${updates.paymentMethod}`);
+            if (updates.splitAmounts) parts.push(`split ₹${updates.splitAmounts.cash || 0} / ₹${updates.splitAmounts.online || 0}`);
+            await logOrderActivity(id, 'PAYMENT_UPDATED', `Payment updated (${parts.join(', ')}).`);
+        }
+        if (!added.length && !removed.length && updates.status === undefined && updates.paymentMethod === undefined && updates.paymentStatus === undefined && updates.splitAmounts === undefined) {
+            await logOrderActivity(id, 'ORDER_UPDATED', 'Order details updated.');
+        }
+
+        setOrders(prev => prev.map(order => order.id === id ? { ...order, ...newDetails, id, status: dbPayload.status, total: dbPayload.total !== undefined ? dbPayload.total : current.total } : order));
+        return { error: null };
+    };
+
+    const fetchStaffAccounts = async () => {
+        const { data, error } = await supabase.from('staff_accounts').select('id, name, active').order('name', { ascending: true });
+        if (error) { console.error('Staff accounts fetch error:', error); return; }
+        setStaffAccounts(Array.isArray(data) ? data : []);
+    };
+
+    const saveStaffAccount = async (e) => {
+        e.preventDefault();
+        const name = String(staffAccountForm.name || '').trim();
+        const pin = String(staffAccountForm.pin || '').trim();
+        if (!name) return alert('Operator name is required.');
+        if (!/^\d{4}$/.test(pin)) return alert('Operator PIN must be exactly 4 digits.');
+        setStaffAccountSaving(true);
+        const result = staffAccountForm.id ? await supabase.from('staff_accounts').update({name,pin,active:true}).eq('id',staffAccountForm.id) : await supabase.from('staff_accounts').insert([{name,pin,active:true}]);
+        setStaffAccountSaving(false);
+        if (result.error) return alert(result.error.message || 'Could not save operator.');
+        const wasEdit = !!staffAccountForm.id;
+        setStaffAccountForm({id:null,name:'',pin:''});
+        await fetchStaffAccounts();
+        alert(wasEdit ? 'Operator updated successfully.' : 'Operator added successfully.');
+    };
+
+    const deactivateStaffAccount = async (id) => {
+        if (!confirm('Remove this operator from the selection list?')) return;
+        const { error } = await supabase.from('staff_accounts').update({active:false}).eq('id',id);
+        if (error) return alert(error.message || 'Could not remove operator.');
+        fetchStaffAccounts();
     };
 
     const handleHistoryAddItem = async () => {
@@ -1127,7 +1470,8 @@ const handleSaveMissingItem = async (e) => {
                         id: invIdKey, name: historyItemForm.name, qty: qty, price: price, isCustom: true, isInv: true, invId: historyItemForm.invId
                     });
                 }
-                await supabase.from('inventory_items').update({ stock: invItem.stock - qty }).eq('id', invItem.id);
+                const newStock = await adjustInventoryStock(invItem.id, -qty);
+                if (newStock === null) return;
             }
         } else {
             updatedCustomItems.push({
@@ -1153,7 +1497,7 @@ const handleSaveMissingItem = async (e) => {
         setHistoryItemForm({ name: '', price: '', qty: 1, menuId: null, invId: null, isInv: false });
     };
 
-    const handleSaveHistoryEdit = async (e) => {
+  const handleSaveHistoryEdit = async (e) => {
         e.preventDefault();
         const order = editHistoryModal.order;
         const form = new FormData(e.target);
@@ -1171,6 +1515,21 @@ const handleSaveMissingItem = async (e) => {
                 return;
             }
             splitAmounts = { cash: c, online: o };
+        }
+
+        // --- FIX: INSTANT LIVE REFUND ON CANCELLATION ---
+        if (newStatus === 'Cancelled' && order.status !== 'Cancelled') {
+            const cItems = order.customItems || [];
+            for (const c of cItems) {
+                if (c.isInv && c.invId) {
+                    const refundQty = Number(c.qty) || 0;
+                    if (refundQty > 0) {
+                        const newStock = await adjustInventoryStock(c.invId, refundQty);
+                        if (newStock === null) return;
+                    }
+                }
+            }
+            alert("Order cancelled. Inventory stock has been accurately refunded.");
         }
 
         await updateOrder(order.id, {
@@ -1251,7 +1610,8 @@ const handleSaveMissingItem = async (e) => {
             customItems: updatedCustomItems,
             total: newTotal
         });
-        await supabase.from('inventory_items').update({ stock: item.stock - 1 }).eq('id', item.id);
+        const newStock = await adjustInventoryStock(item.id, -1);
+        if (newStock === null) return;
     };
 
     const handleBillBarcodeSubmit = (e) => {
@@ -1289,164 +1649,302 @@ const handleSaveMissingItem = async (e) => {
         setBillBarcode('');
     };
 
-    const updateLiveOrderItemQty = async (orderId, itemKey, isCustom, newQty) => {
-        if (newQty < 1) return;
-        
-        const order = orders.find(o => o.id === orderId);
-        if (!order) return;
+  const updateLiveOrderItemQty = async (orderId, itemKey, isCustom, newQty) => {
+        return withOrderMutationLock(orderId, async () => {
+            const requestedQty = Number(newQty);
+            if (!Number.isFinite(requestedQty) || requestedQty < 1) return;
 
-        let updatedRegularItems = { ...(order.items || {}) };
-        let updatedCustomItems = [...(order.customItems || [])];
-        let priceDiff = 0;
+            const { data: dbOrder, error: fetchError } = await supabase
+                .from('orders')
+                .select('*')
+                .eq('id', orderId)
+                .single();
 
-        if (isCustom) {
-            const cItemIndex = updatedCustomItems.findIndex(c => c.id === itemKey);
-            if (cItemIndex >= 0) {
+            if (fetchError || !dbOrder) {
+                alert(fetchError?.message || 'Unable to load the latest order.');
+                return;
+            }
+
+            const order = {
+                ...dbOrder.order_details,
+                id: dbOrder.id,
+                status: dbOrder.status,
+                tableNo: dbOrder.table_no,
+                total: dbOrder.total
+            };
+
+            let updatedRegularItems = { ...(order.items || {}) };
+            let updatedCustomItems = [...(order.customItems || [])];
+            let priceDiff = 0;
+            let inventoryDelta = 0;
+            let inventoryId = null;
+
+            if (isCustom) {
+                const cItemIndex = updatedCustomItems.findIndex(c => c.id === itemKey);
+                if (cItemIndex < 0) return;
+
                 const cItem = updatedCustomItems[cItemIndex];
-                const diff = newQty - cItem.qty;
+                const oldQty = Number(cItem.qty) || 0;
+                const diff = requestedQty - oldQty;
 
-                if (itemKey.startsWith('inv_') && cItem.invId) {
-                    const invItem = inventoryItems.find(i => i.id === cItem.invId);
-                    if(invItem) {
-                        if (diff > 0 && invItem.stock < diff) {
-                            alert("Not enough stock in inventory!");
-                            return;
-                        }
-                        await supabase.from('inventory_items').update({ stock: invItem.stock - diff }).eq('id', invItem.id);
-                    }
+                if (cItem.isInv && cItem.invId && diff !== 0) {
+                    inventoryId = cItem.invId;
+                    inventoryDelta = -diff;
+
+                    const newStock = await adjustInventoryStock(
+                        cItem.invId,
+                        inventoryDelta
+                    );
+
+                    if (newStock === null) return;
                 }
 
-                priceDiff = diff * Number(cItem.price);
-                updatedCustomItems[cItemIndex] = { ...cItem, qty: newQty };
+                priceDiff = diff * Number(cItem.price || 0);
+                updatedCustomItems[cItemIndex] = {
+                    ...cItem,
+                    qty: requestedQty
+                };
+            } else {
+                const menuId = itemKey.replace('menu_', '');
+                const oldQty = Number(updatedRegularItems[menuId] || 0);
+                updatedRegularItems[menuId] = requestedQty;
+
+                const mItem = menuItems.find(i => i.id === parseInt(menuId));
+                const price = mItem
+                    ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) || 0
+                    : 0;
+
+                priceDiff = (requestedQty - oldQty) * price;
             }
-        } else {
-            const menuId = itemKey.replace('menu_', '');
-            const oldQty = updatedRegularItems[menuId] || 1;
-            updatedRegularItems[menuId] = newQty;
-            
-            const mItem = menuItems.find(i => i.id === parseInt(menuId));
-            const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
-            priceDiff = (newQty - oldQty) * price;
-        }
 
-        const newTotal = Number(order.total || 0) + priceDiff;
+            const newTotal = Math.max(
+                0,
+                Number(order.total || 0) + priceDiff
+            );
 
-        await updateOrder(orderId, { 
-            customItems: updatedCustomItems, 
-            items: updatedRegularItems,
-            total: newTotal 
+            const result = await updateOrder(orderId, {
+                customItems: updatedCustomItems,
+                items: updatedRegularItems,
+                total: newTotal
+            });
+
+            if (result?.error) {
+                if (inventoryId && inventoryDelta !== 0) {
+                    await adjustInventoryStock(inventoryId, -inventoryDelta);
+                }
+                alert(result.error.message || 'Unable to update order.');
+                return;
+            }
+
+            sendAdminNotification(
+                '🔄 Order Quantity Updated',
+                `Order #${order.displayId || order.id} quantity was changed.`
+            );
         });
-
-        // --- ADD THIS NOTIFICATION ---
-        sendAdminNotification("🔄 Order Quantity Updated", `Order #${order.id} quantities were modified.`);
     };
 
     const removeLiveOrderItem = async (orderId, itemKey, isCustom) => {
         if (!confirm('Are you sure you want to remove this item from the order?')) return;
-        
-        const order = orders.find(o => o.id === orderId);
-        if (!order) return;
 
-        let updatedRegularItems = { ...(order.items || {}) };
-        let updatedCustomItems = [...(order.customItems || [])];
-        let priceDiff = 0;
+        return withOrderMutationLock(orderId, async () => {
+            const { data: dbOrder, error: fetchError } = await supabase
+                .from('orders')
+                .select('*')
+                .eq('id', orderId)
+                .single();
 
-        if (isCustom) {
-            const cItem = updatedCustomItems.find(c => c.id === itemKey);
-            if (cItem) {
-                if (itemKey.startsWith('inv_') && cItem.invId) {
-                    const invItem = inventoryItems.find(i => i.id === cItem.invId);
-                    if(invItem) {
-                        await supabase.from('inventory_items').update({ stock: invItem.stock + cItem.qty }).eq('id', invItem.id);
+            if (fetchError || !dbOrder) {
+                alert(fetchError?.message || 'Unable to load the latest order.');
+                return;
+            }
+
+            const order = {
+                ...dbOrder.order_details,
+                id: dbOrder.id,
+                status: dbOrder.status,
+                tableNo: dbOrder.table_no,
+                total: dbOrder.total
+            };
+
+            let updatedRegularItems = { ...(order.items || {}) };
+            let updatedCustomItems = [...(order.customItems || [])];
+            let priceDiff = 0;
+            let removedItemName = 'Item';
+            let inventoryRefund = null;
+
+            if (isCustom) {
+                const cItem = updatedCustomItems.find(c => c.id === itemKey);
+                if (!cItem) return;
+
+                removedItemName = cItem.name || 'Item';
+
+                if (cItem.isInv && cItem.invId) {
+                    const refundQty = Number(cItem.qty) || 0;
+                    if (refundQty > 0) {
+                        const newStock = await adjustInventoryStock(
+                            cItem.invId,
+                            refundQty
+                        );
+
+                        if (newStock === null) return;
+                        inventoryRefund = { invId: cItem.invId, qty: refundQty };
                     }
                 }
-                priceDiff = -(Number(cItem.qty) * Number(cItem.price));
+
+                priceDiff = -(Number(cItem.qty || 0) * Number(cItem.price || 0));
                 updatedCustomItems = updatedCustomItems.filter(c => c.id !== itemKey);
+            } else {
+                const menuId = itemKey.replace('menu_', '');
+                const oldQty = Number(updatedRegularItems[menuId] || 0);
+                const mItem = menuItems.find(i => i.id === parseInt(menuId));
+                removedItemName = mItem?.name || 'Item';
+
+                const price = mItem
+                    ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) || 0
+                    : 0;
+
+                priceDiff = -(oldQty * price);
+                delete updatedRegularItems[menuId];
             }
-        } else {
-            const menuId = itemKey.replace('menu_', '');
-            const oldQty = updatedRegularItems[menuId] || 0;
-            const mItem = menuItems.find(i => i.id === parseInt(menuId));
-            const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
-            priceDiff = -(oldQty * price);
-            delete updatedRegularItems[menuId];
-        }
 
-        const newTotal = Math.max(0, Number(order.total || 0) + priceDiff);
-        const updatedStatuses = { ...(order.itemStatuses || {}) };
-        delete updatedStatuses[itemKey];
+            const newTotal = Math.max(
+                0,
+                Number(order.total || 0) + priceDiff
+            );
 
-       await updateOrder(orderId, { 
-            customItems: updatedCustomItems, 
-            items: updatedRegularItems,
-            itemStatuses: updatedStatuses,
-            total: newTotal 
+            const updatedStatuses = { ...(order.itemStatuses || {}) };
+            delete updatedStatuses[itemKey];
+
+            const result = await updateOrder(orderId, {
+                customItems: updatedCustomItems,
+                items: updatedRegularItems,
+                itemStatuses: updatedStatuses,
+                total: newTotal
+            });
+
+            if (result?.error) {
+                if (inventoryRefund) {
+                    await adjustInventoryStock(
+                        inventoryRefund.invId,
+                        -inventoryRefund.qty
+                    );
+                }
+                alert(result.error.message || 'Unable to remove item from order.');
+                return;
+            }
+
+            sendAdminNotification(
+                '🗑️ Item Removed',
+                `${removedItemName} removed from Order #${order.displayId || order.id}.`
+            );
         });
-
-        // --- ADD THIS NOTIFICATION ---
-        sendAdminNotification("🗑️ Item Removed", `An item was removed from Order #${order.id}.`);
     };
 
     const handleAddCustomItem = async (orderId) => {
-        const order = orders.find(o => o.id === orderId);
-        if (!order || !customItemForm.name || !customItemForm.price) return;
+        return withOrderMutationLock(orderId, async () => {
+            const { data: dbOrder, error: fetchError } = await supabase
+                .from('orders')
+                .select('*')
+                .eq('id', orderId)
+                .single();
 
-        const qty = Number(customItemForm.qty) || 1;
-        const price = Number(customItemForm.price) || 0;
+            if (fetchError || !dbOrder) {
+                alert(fetchError?.message || 'Unable to load the latest order.');
+                return;
+            }
 
-        let updatedCustomItems = order.customItems || [];
-        let updatedRegularItems = { ...(order.items || {}) };
+            const order = {
+                ...dbOrder.order_details,
+                id: dbOrder.id,
+                status: dbOrder.status,
+                tableNo: dbOrder.table_no,
+                total: dbOrder.total
+            };
 
-        if (customItemForm.menuId) {
-            updatedRegularItems[customItemForm.menuId] = (updatedRegularItems[customItemForm.menuId] || 0) + qty;
-        } else if (customItemForm.isInv && customItemForm.invId) {
-            const invItem = inventoryItems.find(i => i.id === customItemForm.invId);
-            if (invItem) {
-                if (invItem.stock < qty) {
-                    alert("Not enough stock in inventory!");
-                    return;
-                }
+            if (!customItemForm.name || !customItemForm.price) return;
+
+            const qty = Number(customItemForm.qty) || 1;
+            const price = Number(customItemForm.price) || 0;
+
+            let updatedCustomItems = [...(order.customItems || [])];
+            let updatedRegularItems = { ...(order.items || {}) };
+            let inventoryDeducted = null;
+
+            if (customItemForm.menuId) {
+                updatedRegularItems[customItemForm.menuId] =
+                    (Number(updatedRegularItems[customItemForm.menuId]) || 0) + qty;
+            } else if (customItemForm.isInv && customItemForm.invId) {
                 const invIdKey = `inv_${customItemForm.invId}`;
                 const existingIdx = updatedCustomItems.findIndex(c => c.id === invIdKey);
+
+                const newStock = await adjustInventoryStock(
+                    customItemForm.invId,
+                    -qty
+                );
+
+                if (newStock === null) return;
+                inventoryDeducted = { invId: customItemForm.invId, qty };
+
                 if (existingIdx >= 0) {
-                    updatedCustomItems[existingIdx].qty += qty;
+                    updatedCustomItems[existingIdx] = {
+                        ...updatedCustomItems[existingIdx],
+                        qty: Number(updatedCustomItems[existingIdx].qty || 0) + qty
+                    };
                 } else {
                     updatedCustomItems.push({
                         id: invIdKey,
                         name: customItemForm.name,
-                        qty: qty,
-                        price: price,
+                        qty,
+                        price,
                         isCustom: true,
                         isInv: true,
                         invId: customItemForm.invId
                     });
                 }
-                await supabase.from('inventory_items').update({ stock: invItem.stock - qty }).eq('id', invItem.id);
+            } else {
+                updatedCustomItems.push({
+                    id: `custom_${Date.now()}`,
+                    name: customItemForm.name,
+                    qty,
+                    price,
+                    isCustom: true
+                });
             }
-        } else {
-            const newItem = {
-                id: `custom_${Date.now()}`,
-                name: customItemForm.name,
-                qty: qty,
-                price: price,
-                isCustom: true
-            };
-            updatedCustomItems = [...updatedCustomItems, newItem];
-        }
 
-        const newTotal = Number(order.total || 0) + (qty * price);
+            const newTotal = Number(order.total || 0) + (qty * price);
 
-        await updateOrder(order.id, { 
-            customItems: updatedCustomItems, 
-            items: updatedRegularItems,
-            total: newTotal 
+            const result = await updateOrder(order.id, {
+                customItems: updatedCustomItems,
+                items: updatedRegularItems,
+                total: newTotal
+            });
+
+            if (result?.error) {
+                if (inventoryDeducted) {
+                    await adjustInventoryStock(
+                        inventoryDeducted.invId,
+                        inventoryDeducted.qty
+                    );
+                }
+                alert(result.error.message || 'Unable to add item to order.');
+                return;
+            }
+
+            sendAdminNotification(
+                '✏️ Order Updated',
+                `${customItemForm.name} ×${qty} added to Order #${order.displayId || order.id} (Table: ${order.tableNo || 'Counter'}).`
+            );
+
+            setAddingItemTo(null);
+            setCustomItemForm({
+                name: '',
+                qty: 1,
+                price: '',
+                menuId: null,
+                invId: null,
+                isInv: false
+            });
         });
-
-        // --- ADD THIS NOTIFICATION ---
-        sendAdminNotification("✏️ Order Updated", `Item added to Order #${order.id} (Table: ${order.tableNo})`);
-        
-        setAddingItemTo(null);
-        setCustomItemForm({ name: '', qty: 1, price: '', menuId: null, invId: null, isInv: false });
     };
 
     const handleSelectSuggestion = (item, isInv = false) => {
@@ -1512,14 +2010,24 @@ const handleCreateBill = async () => {
             }
         });
 
-        // Deduct inventory stock for POS created bills
+        // Deduct inventory stock atomically for every inventory-backed POS item.
+        // If the order cannot be saved, all deductions are rolled back below.
+        const deductedInventory = [];
         for (const item of billItemsList) {
-            if (item.isInv && item.invId) {
-                const invItem = inventoryItems.find(i => i.id === item.invId);
-                if (invItem) {
-                    await supabase.from('inventory_items').update({ stock: invItem.stock - item.qty }).eq('id', invItem.id);
+            if (!item.isInv || !item.invId) continue;
+
+            const qty = Number(item.qty) || 0;
+            if (qty <= 0) continue;
+
+            const newStock = await adjustInventoryStock(item.invId, -qty);
+            if (newStock === null) {
+                for (const deducted of deductedInventory) {
+                    await adjustInventoryStock(deducted.invId, deducted.qty);
                 }
+                return;
             }
+
+            deductedInventory.push({ invId: item.invId, qty });
         }
 
         let existingOrder = orders.find(o => {
@@ -1543,7 +2051,7 @@ const handleCreateBill = async () => {
                 const mergedCustomItems = [...(orderDetails.customItems || []), ...customItems];
                 const mergedTotal = Number(dbOrder.total || 0) + addedTotal;
 
-                const updatedDetails = { ...orderDetails, items: mergedRegularItems, customItems: mergedCustomItems };
+                const updatedDetails = buildOperatorMeta({ ...orderDetails, items: mergedRegularItems, customItems: mergedCustomItems });
 
                 const { error } = await supabase.from('orders').update({
                     total: mergedTotal,
@@ -1552,13 +2060,27 @@ const handleCreateBill = async () => {
                 }).eq('id', dbOrder.id);
 
                 if (error) {
+                    for (const deducted of deductedInventory) {
+                        await adjustInventoryStock(deducted.invId, deducted.qty);
+                    }
                     alert("Error merging bill.");
                 } else {
+                    const addedItemText = billItemsList
+                        .map(item => `${item.name} ×${Number(item.qty) || 0}`)
+                        .join(', ');
+
+                    await logOrderActivity(
+                        dbOrder.id,
+                        'ITEM_ADDED',
+                        `${addedItemText || 'Items'} added to existing Order #${dbOrder.id}.`
+                    );
+
+                    sendAdminNotification(
+                        '🛒 Order Updated',
+                        `${addedItemText || 'Items added'} to Order #${dbOrder.id} by ${currentOperator.name}.`
+                    );
+
                     alert(`Successfully merged into active Order #${dbOrder.id}`);
-                    
-                    // --- TRIGGER NOTIFICATION ---
-                    sendAdminNotification("🛒 Order Updated/Merged", `Bill merged into Active Order #${dbOrder.id} (₹${mergedTotal})`);
-                    
                     resetPOS();
                     setActiveTab('orders');
                     fetchData();
@@ -1572,6 +2094,13 @@ const handleCreateBill = async () => {
                 customer_phone: billCustomerPhone || 'Walk-in',
                 item_names: generateItemNamesString(regularItems, customItems),
                 order_details: {
+                    created_by_name: currentOperator.name,
+                    created_by_id: currentOperator.id,
+                    created_by_role: currentOperator.role,
+                    last_updated_by_name: currentOperator.name,
+                    last_updated_by_id: currentOperator.id,
+                    last_updated_by_role: currentOperator.role,
+                    last_updated_at: new Date().toISOString(),
                     date: getFormattedDate(), 
                     time: getFormattedTime(),
                     timestamp: Date.now(),
@@ -1590,11 +2119,25 @@ const handleCreateBill = async () => {
                 .select();
 
             if (error) {
+                for (const deducted of deductedInventory) {
+                    await adjustInventoryStock(deducted.invId, deducted.qty);
+                }
                 alert("Error creating bill.");
             } else {
-                // --- TRIGGER NOTIFICATION ---
-                const newId = data?.[0]?.id || 'New';
-                sendAdminNotification("📦 New Bill Created", `Order #${newId} created for Table: ${billTableNo || 'Counter'} (₹${addedTotal})`);
+                const newId = data?.[0]?.id || null;
+
+                if (newId) {
+                    await logOrderActivity(
+                        newId,
+                        'CREATED',
+                        `Order #${newId} created by ${currentOperator.name}.`
+                    );
+                }
+
+                sendAdminNotification(
+                    '📦 New Bill Created',
+                    `Order #${newId || 'New'} created by ${currentOperator.name} for Table: ${billTableNo || 'Counter'} (₹${addedTotal}).`
+                );
 
                 resetPOS();
                 setActiveTab('orders');
@@ -2973,7 +3516,73 @@ const handleCreateBill = async () => {
                             )}
                         </div>
 
-                        <button onClick={() => setViewOrderDetails(null)} className="w-full bg-slate-200 hover:bg-slate-300 text-black font-bold py-3 rounded-xl transition">Close</button>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4 text-xs">
+                            <div className="bg-gray-100 rounded-lg p-2 text-gray-700">
+                                <span className="font-bold">Created by:</span> {viewOrderDetails.created_by_name || 'Before tracking'}
+                            </div>
+                            <div className="bg-gray-100 rounded-lg p-2 text-gray-700">
+                                <span className="font-bold">Last updated by:</span> {viewOrderDetails.last_updated_by_name || 'Before tracking'}
+                            </div>
+                        </div>
+                        <button type="button" onClick={() => { setViewOrderDetails(null); }} className="w-full bg-slate-200 hover:bg-slate-300 text-black font-bold py-3 rounded-xl transition">Close</button>
+                    </div>
+                </div>
+            )}
+
+
+            {orderActivityModal.open && (
+                <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                    <div className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-lg max-h-[85vh] flex flex-col">
+                        <div className="flex items-center justify-between p-5 border-b border-white/10">
+                            <div>
+                                <h3 className="text-xl font-black text-white">Order #{orderActivityModal.orderLabel} Activity</h3>
+                                <p className="text-xs text-gray-400 mt-1">Who created, changed, paid, completed or modified this order.</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setOrderActivityModal({ open: false, orderId: null, orderLabel: '', rows: [], loading: false })}
+                                className="text-gray-400 hover:text-white text-2xl px-2"
+                            >×</button>
+                        </div>
+
+                        <div className="p-5 overflow-y-auto space-y-3">
+                            {orderActivityModal.loading ? (
+                                <div className="py-10 text-center text-gray-400">Loading activity...</div>
+                            ) : orderActivityModal.rows.length === 0 ? (
+                                <div className="py-10 text-center">
+                                    <div className="text-3xl mb-2">🕘</div>
+                                    <p className="text-gray-400">No activity recorded for this order.</p>
+                                    <p className="text-xs text-gray-600 mt-1">Orders created before operator tracking may have no history.</p>
+                                </div>
+                            ) : (
+                                orderActivityModal.rows.map(row => (
+                                    <div key={row.id} className="bg-black/20 border border-white/5 rounded-xl p-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <span className="font-bold text-white">{row.operator_name || 'Unknown'}</span>
+                                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-400 font-bold uppercase">{row.action || 'UPDATED'}</span>
+                                                </div>
+                                                <p className="text-sm text-gray-300 mt-2 break-words">{row.description || 'Order updated.'}</p>
+                                            </div>
+                                            <div className="text-right shrink-0">
+                                                <div className="text-[10px] text-gray-500">{row.created_at ? getFormattedDate(new Date(row.created_at)) : ''}</div>
+                                                <div className="text-[10px] text-gray-500">{row.created_at ? getFormattedTime(new Date(row.created_at)) : ''}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+
+                        <div className="p-4 border-t border-white/10">
+                            <button
+                                type="button"
+                                onClick={() => setOrderActivityModal({ open: false, orderId: null, orderLabel: '', rows: [], loading: false })}
+                                className="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl"
+                            >Close
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
@@ -3356,7 +3965,7 @@ const handleCreateBill = async () => {
                 <div className="flex justify-between items-center mb-10">
                     <div className="flex items-center gap-3">
                         <div className="w-10 h-10 bg-cyan-500 rounded-lg flex items-center justify-center font-bold text-black text-xl">{appName.charAt(0).toUpperCase()}</div>
-                        <div><h1 className="text-md font-bold font-serif tracking-wide">{appName.toUpperCase()}</h1></div>
+                        <div><h1 className="text-md font-bold font-serif tracking-wide">{appName.toUpperCase()}</h1><p className="text-[9px] text-gray-500 mt-0.5">Operator: <span className="text-cyan-400 font-bold">{currentOperator.name}</span></p></div>
                     </div>
                     
                     {/* --- DESKTOP TOGGLE SWITCH --- */}
@@ -3391,16 +4000,19 @@ const handleCreateBill = async () => {
                     <SidebarBtn icon="⚙️" label={`Settings ${!isUnlocked ? '🔒' : ''}`} active={activeTab === 'settings'} onClick={() => handleTabClick('settings')} />
                 </nav>
 
-                <button onClick={handleLockApp} className="mt-4 flex items-center gap-3 px-4 py-3 text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded-xl transition-all">
-                    <span className="text-sm font-bold">{isUnlocked ? 'Lock App 🔒' : 'App is Locked 🔒'}</span>
-                </button>
+                <div className="mt-4 grid grid-cols-2 gap-2">
+                   
+                    <button type="button" onClick={handleLockApp} className="flex items-center justify-center gap-2 px-3 py-3 text-red-400 bg-red-500/10 hover:bg-red-500/20 rounded-xl transition-all text-xs font-bold">
+                        {isUnlocked ? '🔒 Lock App' : '🔒 Locked'}
+                    </button>
+                </div>
             </aside> {/* <--- THIS CLOSING TAG FIXES THE ERROR */}
            <div className="flex-1 flex flex-col h-screen overflow-hidden">
                 <header className="md:hidden bg-slate-900 border-b border-white/10 p-4 flex items-center justify-between z-30 sticky top-0">
                     <button onClick={() => setIsSidebarOpen(true)} className="p-2 bg-white/10 rounded-lg">
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
                     </button>
-                    <span className="font-bold text-[22px] text-cyan-400 tracking-wide">{appName}</span>
+                    <div className="text-center min-w-0"><span className="font-bold text-[22px] text-cyan-400 tracking-wide block truncate">{appName}</span><span className="text-[9px] text-gray-500 block truncate">{currentOperator.name}</span></div>
                     
                     <div className="flex items-center">
                         
@@ -3845,7 +4457,7 @@ onClick={async () => {
                                                         </div>
                                                     </div>
 
-                                                    <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
+        <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
                                                         <table className="w-full text-left text-sm text-gray-400 min-w-[600px]">
                                                             <thead className="bg-black/30 text-white uppercase text-xs">
                                                                 <tr>
@@ -3964,143 +4576,293 @@ onClick={async () => {
                         {/* --- TAB: INVENTORY MANAGER --- */}
 {activeTab === 'inventory' && (
     <div className="max-w-7xl mx-auto pb-10">
-        
-        {/* --- WHATSAPP LOW STOCK DISPATCHER CARD --- */}
-        <div className="bg-slate-800 p-5 rounded-xl border border-white/10 shadow-lg mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-l-4 border-l-green-500">
-            <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                    <span className="text-xl">💬</span>
-                    <h3 className="font-bold text-white text-base">WhatsApp Low Stock Dispatcher</h3>
+
+        {/* ------------------------------------------------------------
+            INVENTORY HEADER
+           ------------------------------------------------------------ */}
+        <div className="mb-5">
+            <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="min-w-0">
+                    <h2 className="text-2xl font-bold text-white truncate">Inventory Manager</h2>
+                    <p className="text-sm text-gray-400 mt-1 hidden sm:block">
+                        Manage stock, prices, barcodes and inventory items.
+                    </p>
                 </div>
-                <p className="text-xs text-gray-400">
-                    Low Stock Items (<span className="text-yellow-400 font-bold">≤5 qty</span>): {' '}
-                    <span className="text-white font-bold">
-                        {inventoryItems.filter(i => i.stock <= 5).length > 0 
-                            ? inventoryItems.filter(i => i.stock <= 5).map(i => `${i.name} (${i.stock})`).join(', ') 
-                            : 'All items well-stocked! 🎉'}
-                    </span>
-                </p>
             </div>
 
-            <div className="flex items-center gap-3 w-full md:w-auto">
-                {isEditingWa ? (
-                    <div className="flex gap-2 w-full md:w-auto">
-                        <input 
-                            type="text" 
-                            placeholder="e.g. 919876543210" 
-                            value={personalWaNumber} 
-                            onChange={(e) => setPersonalWaNumber(e.target.value)}
-                            className="bg-black/50 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-green-500"
-                        />
-                        <button onClick={() => { localStorage.setItem('personal_wa_number', personalWaNumber); setIsEditingWa(false); }} className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold">Save</button>
-                    </div>
-                ) : (
-                    <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-400">To: <strong className="text-white">{personalWaNumber || 'No number set'}</strong></span>
-                        <button onClick={() => setIsEditingWa(true)} className="text-xs text-cyan-400 underline hover:text-cyan-300">Edit</button>
-                    </div>
-                )}
-
-                <button 
-                    onClick={() => {
-                        if (!personalWaNumber) {
-                            alert("Please set your personal WhatsApp number first!");
-                            setIsEditingWa(true);
-                            return;
-                        }
-                        const lowItems = inventoryItems.filter(i => i.stock <= 5);
-                        if (lowItems.length === 0) {
-                            alert("No low stock items to report right now!");
-                            return;
-                        }
-                        let msg = "🚨 *HOTEL INVENTORY REFILL ALERT* 🚨\n\nThe following items are running low and need to be refilled:\n\n";
-                        lowItems.forEach(i => {
-                            msg += `• *${i.name}* - Left: *${i.stock}* units\n`;
-                        });
-                        msg += "\nPlease arrange stock updates accordingly.";
-                        
-                        const url = `https://wa.me/${personalWaNumber}?text=${encodeURIComponent(msg)}`;
-                        window.open(url, '_blank');
-                    }}
-                    className="bg-green-600 hover:bg-green-500 text-white px-5 py-2.5 rounded-xl font-bold text-xs transition shadow-lg whitespace-nowrap flex items-center gap-2"
+            {/* WhatsApp + Add Item — always one row */}
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:justify-end sm:items-center">
+                <button
+                    type="button"
+                    onClick={() => setInventoryWhatsAppModal(true)}
+                    className="w-full sm:w-auto bg-[#25D366] hover:bg-[#1ebe5d] text-black px-4 py-2.5 rounded-xl font-bold text-sm transition shadow-lg flex items-center justify-center gap-2 active:scale-[0.98]"
                 >
-                    <span>📲 Send WhatsApp Alert</span>
+                    <span>📲</span>
+                    <span>WhatsApp</span>
+                </button>
+
+                <button
+                    type="button"
+                    onClick={() => setInvModal({open: true, mode: 'add', data: null})}
+                    className="w-full sm:w-auto bg-cyan-500 text-black px-4 py-2.5 rounded-xl font-bold text-sm hover:bg-cyan-400 transition shadow-lg flex items-center justify-center gap-2 active:scale-[0.98]"
+                >
+                    <span>＋</span>
+                    <span>Add Item</span>
                 </button>
             </div>
         </div>
 
-        {/* Inventory Header & Controls */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
-            <h2 className="text-2xl font-bold">Inventory Manager</h2>
-            <button onClick={() => setInvModal({open: true, mode: 'add', data: null})} className="bg-cyan-500 text-black px-4 py-2 rounded-xl font-bold hover:bg-cyan-400 transition">+ Add Item</button>
-        </div>
-        
-        {/* --- CATEGORY FILTER TABS (All, Inventory, Food) & SEARCH --- */}
-        <div className="flex flex-col md:flex-row gap-4 mb-6 items-center justify-between">
-            <div className="flex gap-2 w-full md:w-auto">
+        {/* ------------------------------------------------------------
+            WHATSAPP REPORT CHOOSER
+           ------------------------------------------------------------ */}
+        {inventoryWhatsAppModal && (
+            <div
+                className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+                onClick={() => setInventoryWhatsAppModal(false)}
+            >
+                <div
+                    className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-md p-6"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className="flex items-center justify-between mb-5">
+                        <div>
+                            <h3 className="text-xl font-bold text-white">WhatsApp Stock Report</h3>
+                            <p className="text-xs text-gray-400 mt-1">
+                                Send manually to <span className="text-green-400 font-bold">7972506748</span>
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setInventoryWhatsAppModal(false)}
+                            className="text-gray-400 hover:text-white text-2xl"
+                            aria-label="Close"
+                        >
+                            ×
+                        </button>
+                    </div>
+
+                    <div className="space-y-3">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const lowItems = inventoryItems.filter(
+                                    item => Number(item.stock) <= 5
+                                );
+
+                                if (lowItems.length === 0) {
+                                    alert('No low stock items right now.');
+                                    return;
+                                }
+
+                                let msg =
+                                    `🚨 *VALO LOW STOCK REPORT* 🚨\n\n` +
+                                    `📅 ${getFormattedDate()} ${getFormattedTime()}\n\n` +
+                                    `*Items at or below 5 units:*\n\n`;
+
+                                lowItems.forEach(item => {
+                                    msg +=
+                                        `• *${item.name}* — ${Number(item.stock) || 0} units\n`;
+                                });
+
+                                msg += `\nPlease arrange stock refill.`;
+
+                                setInventoryWhatsAppModal(false);
+                                openWhatsAppReport(msg);
+                            }}
+                            className="w-full bg-yellow-500 hover:bg-yellow-400 text-black p-4 rounded-xl font-bold text-left transition active:scale-[0.99]"
+                        >
+                            🚨 Send Low Stock Report
+                            <span className="block text-xs font-normal mt-1 opacity-70">
+                                Only items with 5 or fewer units
+                            </span>
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => {
+                                let msg =
+                                    `📊 *VALO INVENTORY STOCK REPORT* 📊\n\n` +
+                                    `📅 ${getFormattedDate()} ${getFormattedTime()}\n\n` +
+                                    `*Current Stock Levels:*\n\n`;
+
+                                if (inventoryItems.length === 0) {
+                                    msg += `No inventory items found.\n`;
+                                } else {
+                                    inventoryItems.forEach(item => {
+                                        const stock = Number(item.stock) || 0;
+                                        msg +=
+                                            `• *${item.name}* — ${stock} units` +
+                                            `${stock <= 5 ? ' 🚨' : ''}\n`;
+                                    });
+                                }
+
+                                msg +=
+                                    `\nTotal items: ${inventoryItems.length}` +
+                                    `\n\nGenerated manually from VALO Admin.`;
+
+                                setInventoryWhatsAppModal(false);
+                                openWhatsAppReport(msg);
+                            }}
+                            className="w-full bg-[#25D366] hover:bg-[#1ebe5d] text-black p-4 rounded-xl font-bold text-left transition active:scale-[0.99]"
+                        >
+                            📦 Send Full Stock Report
+                            <span className="block text-xs font-normal mt-1 opacity-70">
+                                All inventory items and current quantities
+                            </span>
+                        </button>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={() => setInventoryWhatsAppModal(false)}
+                        className="w-full mt-4 bg-white/5 hover:bg-white/10 text-gray-300 p-3 rounded-xl font-bold transition"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        )}
+
+        {/* ------------------------------------------------------------
+            FILTERS + SEARCH
+           ------------------------------------------------------------ */}
+        <div className="flex flex-col lg:flex-row gap-3 mb-6">
+            <div className="flex gap-2 overflow-x-auto pb-1 w-full lg:w-auto">
                 {['All', 'Inventory', 'Food'].map(cat => (
-                    <button 
-                        key={cat} 
-                        onClick={() => setInventoryCategoryFilter(cat)} 
-                        className={`px-6 py-2 rounded-lg text-sm font-bold transition ${inventoryCategoryFilter === cat ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700'}`}
+                    <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setInventoryCategoryFilter(cat)}
+                        className={`px-4 sm:px-6 py-2 rounded-lg text-sm font-bold transition whitespace-nowrap ${inventoryCategoryFilter === cat ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-slate-800 text-gray-400 hover:bg-slate-700'}`}
                     >
                         {cat === 'All' ? 'All Items' : cat}
                     </button>
                 ))}
             </div>
 
-            <div className="w-full md:w-72">
-                <input 
-                    type="text" 
-                    placeholder="Search inventory items or barcodes..." 
-                    value={inventorySearchQuery} 
-                    onChange={(e) => setInventorySearchQuery(e.target.value)} 
-                    className="w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none" 
+            <div className="w-full lg:flex-1 lg:max-w-md lg:ml-auto">
+                <input
+                    type="text"
+                    placeholder="Search inventory items or barcodes..."
+                    value={inventorySearchQuery}
+                    onChange={(e) => setInventorySearchQuery(e.target.value)}
+                    className="w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none"
                 />
             </div>
         </div>
 
-        <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 shadow-lg w-full max-w-[100vw] overflow-x-auto">
-            <table className="w-full text-left text-sm text-gray-400 min-w-[700px]">
-                <thead className="bg-black/30 text-white uppercase text-xs">
-                    <tr>
-                        <th className="p-4">Item Name</th>
-                        <th className="p-4">Category</th>
-                        <th className="p-4">Barcode / SKU</th>
-                        <th className="p-4 text-center">Stock</th>
-                        <th className="p-4 text-right">Price</th>
-                        <th className="p-4 text-center">Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {filteredInventory.map(item => (
-                        <tr key={item.id} className="border-b border-white/5 hover:bg-white/5">
-                            <td className="p-4 font-bold text-white">{item.name}</td>
-                            <td className="p-4">
-                                <span className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase ${item.category === 'Food' ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'}`}>
+        {/* ------------------------------------------------------------
+            INVENTORY CARDS
+            Mobile: 2 cards / row
+            Tablet: 3-4 cards / row
+            Desktop: up to 8 cards / row
+           ------------------------------------------------------------ */}
+        {filteredInventory.length === 0 ? (
+            <div className="bg-slate-800 rounded-xl border border-white/10 shadow-lg text-center py-14 text-gray-500">
+                No inventory items found.
+            </div>
+        ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
+                {filteredInventory.map(item => {
+                    const stock = Number(item.stock) || 0;
+                    const price = Number(item.price) || 0;
+                    const isCritical = stock <= 2;
+                    const isLow = stock <= 5;
+
+                    return (
+                        <div
+                            key={item.id}
+                            className={`bg-slate-800 rounded-xl border shadow-lg p-3.5 flex flex-col min-w-0 transition-all hover:-translate-y-0.5 ${
+                                isCritical
+                                    ? 'border-red-500/40'
+                                    : isLow
+                                        ? 'border-yellow-500/30'
+                                        : 'border-white/10 hover:border-cyan-500/50'
+                            }`}
+                        >
+                            {/* Category */}
+                            <div className="flex items-center justify-between gap-1 mb-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase truncate max-w-[80%] ${
+                                    item.category === 'Food'
+                                        ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/20'
+                                        : 'bg-blue-500/20 text-blue-400 border border-blue-500/20'
+                                }`}>
                                     {item.category || 'Inventory'}
                                 </span>
-                            </td>
-                            <td className="p-4 font-mono text-xs text-gray-500">{item.barcode || '-'}</td>
-                            <td className="p-4 text-center">
-                                <span className={`px-2 py-1 rounded text-xs font-bold ${item.stock <= 5 ? 'bg-red-500/20 text-red-400 animate-pulse' : 'bg-green-500/20 text-green-400'}`}>
-                                    {item.stock} units
-                                </span>
-                            </td>
-                            <td className="p-4 text-right font-mono text-cyan-400">₹{item.price}</td>
-                            <td className="p-4 text-center flex justify-center gap-2">
-                                <button onClick={() => setInvModal({open: true, mode: 'edit', data: item})} className="bg-blue-500/20 text-blue-400 p-2 rounded hover:bg-blue-500 hover:text-white transition" title="Edit Item">✏️</button>
-                                <button onClick={() => deleteInventoryItem(item.id)} className="bg-red-500/20 text-red-400 p-2 rounded hover:bg-red-500 hover:text-white transition" title="Delete Item">🗑</button>
-                            </td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-            {filteredInventory.length === 0 && <div className="text-center py-10 text-gray-500">No inventory items found.</div>}
-        </div>
+                                {isCritical && <span className="text-[10px]">🚨</span>}
+                                {!isCritical && isLow && <span className="text-[10px]">⚠️</span>}
+                            </div>
+
+                            {/* Name */}
+                            <h3
+                                className="font-bold text-white text-sm leading-tight min-h-[2.5rem] line-clamp-2"
+                                title={item.name}
+                            >
+                                {item.name}
+                            </h3>
+
+                            {/* Stock */}
+                            <div className={`mt-3 rounded-lg p-2 text-center ${
+                                isCritical
+                                    ? 'bg-red-500/10 border border-red-500/20'
+                                    : isLow
+                                        ? 'bg-yellow-500/10 border border-yellow-500/20'
+                                        : 'bg-green-500/10 border border-green-500/20'
+                            }`}>
+                                <p className="text-[8px] uppercase tracking-wider text-gray-500 font-bold">Stock</p>
+                                <p className={`text-xl font-black leading-none mt-1 ${
+                                    isCritical ? 'text-red-400' : isLow ? 'text-yellow-400' : 'text-green-400'
+                                }`}>
+                                    {stock}
+                                </p>
+                                <p className="text-[8px] text-gray-500 mt-0.5">units</p>
+                            </div>
+
+                            {/* Details */}
+                            <div className="mt-3 space-y-1.5 text-[10px]">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-gray-500">Price</span>
+                                    <span className="font-bold text-cyan-400">₹{price}</span>
+                                </div>
+
+                                <div className="pt-1.5 border-t border-white/5">
+                                    <p className="text-gray-500 uppercase text-[7px] tracking-wide">Barcode / SKU</p>
+                                    <p
+                                        className="font-mono text-gray-300 truncate mt-0.5"
+                                        title={item.barcode || '-'}
+                                    >
+                                        {item.barcode || '-'}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Actions */}
+                            <div className="grid grid-cols-2 gap-1.5 mt-3 pt-2 border-t border-white/5">
+                                <button
+                                    type="button"
+                                    onClick={() => setInvModal({open: true, mode: 'edit', data: item})}
+                                    className="bg-blue-500/15 text-blue-400 py-2 rounded-lg hover:bg-blue-500 hover:text-white transition text-xs font-bold"
+                                    title="Edit Item"
+                                >
+                                    ✏️ Edit
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => deleteInventoryItem(item.id)}
+                                    className="bg-red-500/15 text-red-400 py-2 rounded-lg hover:bg-red-500 hover:text-white transition text-xs font-bold"
+                                    title="Delete Item"
+                                >
+                                    🗑 Delete
+                                </button>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        )}
     </div>
 )}
-                
+
                     {/* TAB: LIVE ORDERS */}
                     {activeTab === 'orders' && ( 
                         <div className="max-w-4xl mx-auto space-y-4">
@@ -4130,13 +4892,17 @@ onClick={async () => {
                                                     {order.paymentStatus === 'Paid' ? <span className="bg-green-500 text-black text-[10px] font-bold px-2 py-1 rounded">{order.paymentMethod || 'PAID'}</span> : <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-1 rounded">PENDING</span>}
                                                 </div>
                                                 <p className="text-sm text-gray-400">Location: {order.tableNo} • {order.customer?.name} • {order.customer?.phone}</p>
+                                                 {order.created_by_name && <p className="text-[10px] text-cyan-400 mt-1">Created by: <span className="font-bold">{order.created_by_name}</span></p>}
+                                                 {order.last_updated_by_name && <p className="text-[10px] text-gray-500">Last updated by: <span className="font-bold text-gray-300">{order.last_updated_by_name}</span></p>}
+                                                 
                                                 {order.paymentId && <p className="text-[10px] text-cyan-400 mt-1 font-mono">Txn ID: {order.paymentId}</p>}
                                             </div>
                                             <div className="flex flex-col items-end gap-2">
                                                 <span className="text-xl font-bold">₹{order.total}</span>
-                                                <button onClick={() => setScanOrderId(scanOrderId === order.id ? null : order.id)} className={`text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1 transition ${scanOrderId === order.id ? 'bg-blue-600 text-white shadow-lg' : 'bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white'}`}>
-                                                    📷 {scanOrderId === order.id ? 'Scanning...' : 'Scan Item'}
-                                                </button>
+                                                 <div className="flex items-center gap-2">
+                                                     <button type="button" onClick={() => openOrderActivity(order)} className="text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1 bg-purple-500/20 text-purple-400 hover:bg-purple-500 hover:text-white transition">🕘 Activity</button>
+                                                     
+                                                 </div>
                                             </div>
                                         </div>
 
@@ -4253,10 +5019,9 @@ onClick={async () => {
                                             
                                           {order.status === 'Ready' && (
     <button 
-        onClick={() => {
-            updateOrder(order.id, {status: 'Picked Up'});
-            // --- TRIGGER NOTIFICATION ---
-            sendAdminNotification("✅ Order Completed", `Order #${order.displayId || order.id} has been picked up/completed.`);
+        onClick={async () => {
+            const result = await updateOrder(order.id, {status: 'Picked Up'});
+            if (result?.error) return;
         }} 
         className={`px-6 py-3 rounded-lg font-bold flex-1 transition-all ${
             order.paymentStatus === 'Paid' 
@@ -4576,14 +5341,7 @@ onClick={async () => {
                             <div className="max-w-6xl mx-auto">
                                 <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
                                     <h2 className="text-2xl font-bold">Order History</h2>
-                                    <div className="flex gap-2 w-full md:w-auto">
-                                        <button onClick={() => setPendingModal(true)} className="bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 text-red-400 px-4 py-2 rounded-xl text-sm font-bold transition shadow-lg flex items-center gap-2">
-                                    ⚠️ Pending
-                                    <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">
-                                        {orders.filter(o => o.paymentStatus === 'Pending').length}
-                                    </span>
-                                </button>
-                                        <div className="relative flex-1 md:w-72">
+                                     <div className="relative flex-1 md:w-72">
                                             
                                             <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-gray-400">🔍</span>
                                             <input 
@@ -4594,6 +5352,14 @@ onClick={async () => {
                                                 className="w-full bg-slate-800 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition"
                                             />
                                         </div>
+                                    <div className="flex gap-2 w-full md:w-auto">
+                                        <button onClick={() => setPendingModal(true)} className="bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 text-red-400 px-4 py-2 rounded-xl text-sm font-bold transition shadow-lg flex items-center gap-2">
+                                    ⚠️ Pending
+                                    <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">
+                                        {orders.filter(o => o.paymentStatus === 'Pending').length}
+                                    </span>
+                                </button>
+                                       
                                         <button onClick={handleExportHistory} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-xl text-sm font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
                                     </div>
                                 </div>
@@ -4662,7 +5428,8 @@ onClick={async () => {
                                                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
                                                         </button>
 
-                                                        {/* NEW EDIT HISTORY BUTTON */}
+                                                        <button onClick={() => openOrderActivity(order)} className="bg-purple-500/20 hover:bg-purple-500 text-purple-400 hover:text-white p-2 rounded-lg transition" title="Order Activity">🕘</button>
+                                                         {/* NEW EDIT HISTORY BUTTON */}
                                                         <button onClick={() => setEditHistoryModal({ open: true, order: order, tempMethod: order.paymentMethod || 'Cash' })} className="bg-yellow-500/20 hover:bg-yellow-500 text-yellow-400 hover:text-black p-2 rounded-lg transition" title="Edit Order Details">
                                                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                                                         </button>
@@ -4774,6 +5541,27 @@ onClick={async () => {
                                     </div>
                                 </div>
                             </div>
+                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-cyan-500">
+                                <h3 className="text-xl font-bold mb-1">Operator Accounts</h3>
+                                <p className="text-sm text-gray-400 mb-4">Create a separate name and 4-digit PIN for each person who handles orders.</p>
+                                <form onSubmit={saveStaffAccount} className="grid grid-cols-1 md:grid-cols-[1fr_160px_auto] gap-3 mb-5">
+                                    <input type="text" value={staffAccountForm.name} onChange={e => setStaffAccountForm(prev => ({...prev, name: e.target.value}))} placeholder="Operator name" required className="bg-black/30 border border-white/10 rounded-lg p-3 text-white outline-none focus:border-cyan-500" />
+                                    <input type="password" value={staffAccountForm.pin} onChange={e => setStaffAccountForm(prev => ({...prev, pin: e.target.value.replace(/\D/g,'').slice(0,4)}))} placeholder="4-digit PIN" maxLength="4" required className="bg-black/30 border border-white/10 rounded-lg p-3 text-white outline-none focus:border-cyan-500" />
+                                    <button type="submit" disabled={staffAccountSaving} className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-5 py-3 rounded-lg disabled:opacity-50">{staffAccountSaving ? 'Saving...' : staffAccountForm.id ? 'Update' : 'Add Operator'}</button>
+                                </form>
+                                <div className="space-y-2">
+                                    {staffAccounts.length === 0 ? <div className="text-sm text-gray-500 py-4">No operator accounts yet.</div> : staffAccounts.map(staff => (
+                                        <div key={staff.id} className="flex items-center justify-between gap-3 bg-black/20 rounded-xl border border-white/5 p-3">
+                                            <div><p className="font-bold text-white">{staff.name}</p><p className="text-[10px] text-gray-500">Operator ID: {staff.id}</p></div>
+                                            <div className="flex gap-2">
+                                                <button type="button" onClick={() => setStaffAccountForm({id:staff.id,name:staff.name,pin:''})} className="bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white px-3 py-2 rounded-lg text-xs font-bold">Edit</button>
+                                                <button type="button" onClick={() => deactivateStaffAccount(staff.id)} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white px-3 py-2 rounded-lg text-xs font-bold">Remove</button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
 
                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg">
     <h3 className="text-xl font-bold mb-2">Change Admin PIN</h3>
