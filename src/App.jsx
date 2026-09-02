@@ -8,6 +8,212 @@ import { Filesystem } from '@capacitor/filesystem';
 import RoomManagement from './RoomManagement';
 import { LocalNotifications } from '@capacitor/local-notifications';
 
+// ============================================================
+// VALO NOTIFICATION + PWA CONFIGURATION
+// ============================================================
+const VALO_ONESIGNAL_APP_ID = '3a997ca5-9d8f-4e81-8943-907b81b9a577';
+const VALO_SAFARI_WEB_ID = 'web.onesignal.auto.2b9eaa60-5747-4249-a27c-f48aa9ddca65';
+const VALO_ONESIGNAL_WORKER = 'onesignal/OneSignalSDKWorker.js';
+
+// Web OneSignal is ONLY supported on the production HTTPS origin.
+// Keeping localhost completely out of the initialization path prevents
+// "Can only be used on: https://hotelvalo.web.app" errors during development.
+const isValoProductionWeb = () => {
+    if (typeof window === 'undefined') return false;
+    if (Capacitor.isNativePlatform()) return false;
+
+    const hostname = window.location.hostname;
+    const isValoHost =
+        hostname === 'hotelvalo.web.app' ||
+        hostname === 'hotelvalo.firebaseapp.com';
+
+    return window.location.protocol === 'https:' && isValoHost;
+};
+
+// A shared promise prevents React StrictMode / remounts from calling
+// OneSignal.init() twice at the same time.
+let valoOneSignalWebPromise = null;
+
+const loadOneSignalWebSdk = () => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+        return Promise.resolve(null);
+    }
+
+    if (!isValoProductionWeb()) {
+        return Promise.resolve(null);
+    }
+
+    if (window.__VALO_ONESIGNAL_WEB_INSTANCE) {
+        return Promise.resolve(window.__VALO_ONESIGNAL_WEB_INSTANCE);
+    }
+
+    if (valoOneSignalWebPromise) {
+        return valoOneSignalWebPromise;
+    }
+
+    valoOneSignalWebPromise = new Promise((resolve, reject) => {
+        let settled = false;
+
+        const finish = (fn, value) => {
+            if (settled) return;
+            settled = true;
+            fn(value);
+        };
+
+        window.OneSignalDeferred = window.OneSignalDeferred || [];
+
+        window.OneSignalDeferred.push(async (WebOneSignal) => {
+            try {
+                // Another part of the app / a previous mount may already have
+                // initialized the SDK. In that case simply reuse the instance.
+                if (!window.__VALO_ONESIGNAL_WEB_INITIALIZED) {
+                    window.__VALO_ONESIGNAL_WEB_INITIALIZING = true;
+
+                    try {
+                        await WebOneSignal.init({
+                            appId: VALO_ONESIGNAL_APP_ID,
+                            safari_web_id: VALO_SAFARI_WEB_ID,
+                            serviceWorkerPath: VALO_ONESIGNAL_WORKER,
+                            serviceWorkerParam: {
+                                scope: '/onesignal/'
+                            },
+                            notifyButton: {
+                                enable: false
+                            },
+                            welcomeNotification: {
+                                disable: true
+                            }
+                        });
+                    } catch (error) {
+                        const message = String(error?.message || error || '');
+
+                        // OneSignal throws this when the SDK was initialized
+                        // elsewhere. It is safe to reuse the same SDK instance.
+                        if (!message.toLowerCase().includes('already initialized')) {
+                            throw error;
+                        }
+                    }
+
+                    window.__VALO_ONESIGNAL_WEB_INITIALIZED = true;
+                    window.__VALO_ONESIGNAL_WEB_INITIALIZING = false;
+                }
+
+                window.__VALO_ONESIGNAL_WEB_INSTANCE = WebOneSignal;
+                finish(resolve, WebOneSignal);
+            } catch (error) {
+                window.__VALO_ONESIGNAL_WEB_INITIALIZING = false;
+                console.warn('VALO Web OneSignal initialization skipped:', error);
+                finish(reject, error);
+            }
+        });
+
+        const existingScript = document.querySelector(
+            'script[data-valo-onesignal-sdk], script[src*="OneSignalSDK.page.js"]'
+        );
+
+        if (!existingScript) {
+            const script = document.createElement('script');
+            script.src =
+                'https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js';
+            script.defer = true;
+            script.dataset.valoOnesignalSdk = 'true';
+
+            script.onerror = () => {
+                finish(
+                    reject,
+                    new Error('Could not load OneSignal Web SDK.')
+                );
+            };
+
+            document.head.appendChild(script);
+        }
+    });
+
+    return valoOneSignalWebPromise;
+};
+
+const ensurePwaHead = () => {
+    if (typeof document === 'undefined') return;
+    if (!isValoProductionWeb()) return;
+
+    if (!document.querySelector('link[rel="manifest"]')) {
+        const link = document.createElement('link');
+        link.rel = 'manifest';
+        link.href = '/manifest.webmanifest';
+        document.head.appendChild(link);
+    }
+
+    if (!document.querySelector('meta[name="theme-color"]')) {
+        const meta = document.createElement('meta');
+        meta.name = 'theme-color';
+        meta.content = '#0f172a';
+        document.head.appendChild(meta);
+    }
+
+    // Modern replacement for the deprecated
+    // apple-mobile-web-app-capable meta tag.
+    if (!document.querySelector('meta[name="mobile-web-app-capable"]')) {
+        const meta = document.createElement('meta');
+        meta.name = 'mobile-web-app-capable';
+        meta.content = 'yes';
+        document.head.appendChild(meta);
+    }
+
+    if (!document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')) {
+        const meta = document.createElement('meta');
+        meta.name = 'apple-mobile-web-app-status-bar-style';
+        meta.content = 'black-translucent';
+        document.head.appendChild(meta);
+    }
+};
+
+const registerValoPwaWorker = async () => {
+    if (typeof navigator === 'undefined') return null;
+    if (!('serviceWorker' in navigator)) return null;
+    if (!isValoProductionWeb()) return null;
+
+    try {
+        // Firebase/Vite SPA fallback can return index.html for a missing
+        // file. A Service Worker must be JavaScript, so verify the response
+        // before attempting registration.
+        const response = await fetch('/sw.js', {
+            method: 'GET',
+            cache: 'no-store'
+        });
+
+        if (!response.ok) {
+            console.warn(
+                'VALO PWA: /sw.js is not available:',
+                response.status
+            );
+            return null;
+        }
+
+        const contentType =
+            response.headers.get('content-type') || '';
+
+        if (
+            !contentType.includes('javascript') &&
+            !contentType.includes('ecmascript')
+        ) {
+            console.warn(
+                'VALO PWA: /sw.js returned invalid MIME type:',
+                contentType
+            );
+            return null;
+        }
+
+        return await navigator.serviceWorker.register('/sw.js', {
+            scope: '/'
+        });
+    } catch (error) {
+        console.warn(
+            'VALO PWA service worker registration skipped:',
+            error
+        );
+        return null;
+    }
+};
 
 // --- STRICT DATE FORMATTER (DD/MM/YYYY) ---
 const getFormattedDate = (dateObj = new Date()) => {
@@ -81,41 +287,87 @@ const exportCSV = (data, filename) => {
 };
 
 
-const showWebNotification = (title, body) => {
+const showWebNotification = async (title, body, data = {}) => {
     try {
-        if (typeof window === 'undefined' || !("Notification" in window)) return;
-        if (Notification.permission === 'granted') {
-            new Notification(title, { body, icon: '/splash.png' });
-        }
-    } catch (err) {
-        console.error('Web notification error:', err);
-    }
+        if (typeof window === 'undefined' || !('Notification' in window)) return false;
+        if (Notification.permission !== 'granted') return false;
+        const notification = new Notification(title, {
+            body,
+            icon: '/logo.png',
+            badge: '/logo.png',
+            tag: data.tag || 'valo-admin',
+            renotify: true,
+            data
+        });
+        notification.onclick = () => { try { window.focus(); notification.close(); } catch (_) {} };
+        return true;
+    } catch (err) { console.error('Web notification error:', err); return false; }
 };
 
-const sendAdminNotification = async (title, body) => {
+const scheduleNativeLocalNotification = async (title, body, data = {}) => {
     try {
-        // Android APK - OneSignal
+        if (!Capacitor.isNativePlatform()) return false;
+        const permission = await LocalNotifications.checkPermissions();
+        let display = permission?.display;
+        if (display !== 'granted') display = (await LocalNotifications.requestPermissions())?.display;
+        if (display !== 'granted') return false;
+        const notificationId = Math.floor(Date.now() % 2147480000);
+        await LocalNotifications.schedule({
+            notifications: [{
+                id: notificationId,
+                title,
+                body,
+                schedule: { at: new Date(Date.now() + 250) },
+                extra: data
+            }]
+        });
+        return true;
+    } catch (err) { console.error('Native local notification error:', err); return false; }
+};
+
+const requestValoNotificationPermission = async () => {
+    try {
         if (Capacitor.isNativePlatform()) {
-            const nativeApi =
-                OneSignal ||
-                (window.plugins && window.plugins.OneSignal);
-
-            if (nativeApi?.Notifications?.requestPermission) {
-                await nativeApi.Notifications.requestPermission(true);
-            }
-
-            // IMPORTANT:
-            // The Admin app receives pushes from OneSignal.
-            // This function is only used for local/admin-side notifications.
-            console.log('Admin notification:', title, body);
+            try {
+                if (OneSignal?.initialize && !window.__VALO_ONESIGNAL_NATIVE_INITIALIZED) {
+                    OneSignal.initialize(VALO_ONESIGNAL_APP_ID);
+                    window.__VALO_ONESIGNAL_NATIVE_INITIALIZED = true;
+                }
+            } catch (e) { console.warn('Native OneSignal initialize warning:', e); }
+            const local = await LocalNotifications.requestPermissions();
+            let accepted = local?.display === 'granted';
+            try { if (OneSignal?.Notifications?.requestPermission) accepted = (await OneSignal.Notifications.requestPermission(true)) || accepted; }
+            catch (e) { console.warn('Native OneSignal permission warning:', e); }
+            if (accepted) alert('Notifications enabled successfully!');
+            else alert('Notification permission was denied.');
+            return accepted;
         }
+        if (!('Notification' in window)) { alert('This browser does not support notifications.'); return false; }
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') { alert('Notification permission was denied. Enable notifications for VALO in browser settings.'); return false; }
+        try {
+            const web = await loadOneSignalWebSdk();
+            if (web?.Notifications?.requestPermission) await web.Notifications.requestPermission();
+            else if (web?.Slidedown?.promptPush) await web.Slidedown.promptPush();
+        } catch (e) { console.warn('OneSignal web subscription warning:', e); }
+        alert('Notifications enabled successfully!');
+        return true;
+    } catch (err) { console.error('VALO notification permission error:', err); alert('Unable to enable notifications. Check notification permission in device/browser settings.'); return false; }
+};
 
-        // Web/PWA notification
-        showWebNotification(title, body);
+const sendRemoteAdminNotification = async (title, body, data = {}) => {
+    try {
+        const { error } = await supabase.functions.invoke('send-admin-notification', { body: { title, body, data } });
+        if (error) console.warn('Remote admin notification skipped:', error.message || error);
+    } catch (err) { console.warn('Remote notification function unavailable:', err); }
+};
 
-    } catch (err) {
-        console.error('Admin notification error:', err);
-    }
+const sendAdminNotification = async (title, body, data = {}) => {
+    try {
+        if (Capacitor.isNativePlatform()) await scheduleNativeLocalNotification(title, body, data);
+        else await showWebNotification(title, body, data);
+        await sendRemoteAdminNotification(title, body, data);
+    } catch (err) { console.error('Admin notification error:', err); }
 };
 
 export default function AdminPanel() {
@@ -386,6 +638,20 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
 
     // --- OPERATOR / AUDIT TRAIL ---
     const currentOperator = operator || { id: null, name: 'Admin', role: 'admin' };
+    const [installPromptEvent, setInstallPromptEvent] = useState(null);
+    const [showInstallHelp, setShowInstallHelp] = useState(false);
+    const [appNotifications, setAppNotifications] = useState([]);
+
+    const pushAppNotification = (title, body, type = 'info') => {
+        const id = `${Date.now()}_${Math.random()}`;
+        setAppNotifications(prev => [{ id, title, body, type, createdAt: Date.now() }, ...prev].slice(0, 6));
+        window.setTimeout(() => setAppNotifications(prev => prev.filter(item => item.id !== id)), 6500);
+    };
+
+    const notifyOrderEvent = async (title, body, data = {}, type = 'info') => {
+        pushAppNotification(title, body, type);
+        await sendAdminNotification(title, body, data);
+    };
     const [orderActivityModal, setOrderActivityModal] = useState({ open: false, orderId: null, orderLabel: '', rows: [], loading: false });
     const [staffAccounts, setStaffAccounts] = useState([]);
     const [staffAccountForm, setStaffAccountForm] = useState({ id: null, name: '', pin: '' });
@@ -533,6 +799,39 @@ const buildOperatorMeta = (details = {}, isNew = false) => ({
 
 
 // ============================================================
+// WEB/PWA + NATIVE NOTIFICATION INITIALIZATION
+// ============================================================
+useEffect(() => {
+    ensurePwaHead();
+    registerValoPwaWorker();
+    const handleBeforeInstallPrompt = (event) => { event.preventDefault(); setInstallPromptEvent(event); };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    if (Capacitor.isNativePlatform()) {
+        (async () => {
+            try {
+                if (OneSignal?.initialize && !window.__VALO_ONESIGNAL_NATIVE_INITIALIZED) {
+                    OneSignal.initialize(VALO_ONESIGNAL_APP_ID);
+                    window.__VALO_ONESIGNAL_NATIVE_INITIALIZED = true;
+                }
+                await LocalNotifications.requestPermissions();
+            } catch (error) { console.warn('Native notification initialization warning:', error); }
+        })();
+    } else {
+        loadOneSignalWebSdk().catch(error => console.warn('Web OneSignal startup warning:', error));
+    }
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+}, []);
+
+const installValoApp = async () => {
+    if (installPromptEvent) {
+        await installPromptEvent.prompt();
+        const result = await installPromptEvent.userChoice;
+        if (result?.outcome === 'accepted') setInstallPromptEvent(null);
+        return;
+    }
+    setShowInstallHelp(true);
+};
+
 // ANDROID BACK BUTTON NAVIGATION
 // ============================================================
 useEffect(() => {
@@ -729,12 +1028,12 @@ useEffect(() => {
                 // If it dropped to exactly 5 (or from 6 down to 5/4/3)
                 if (prevStock > 5 && item.stock <= 5 && item.stock > 2) {
                     playAlert(); // Play beep sound
-                    showWebNotification("⚠️ LOW STOCK ALERT", `${item.name} is down to ${item.stock} units!`);
+                    notifyOrderEvent('⚠️ LOW STOCK ALERT', `${item.name} is down to ${item.stock} units!`, { type: 'low_stock', inventoryId: item.id }, 'warning');
                 }
                 // If it dropped to exactly 2 (or lower)
                 else if (prevStock > 2 && item.stock <= 2) {
                     playAlert(); // Play beep sound
-                    showWebNotification("🚨 CRITICAL STOCK ALERT", `${item.name} is critically low (${item.stock} units left)!`);
+                    notifyOrderEvent('🚨 CRITICAL STOCK ALERT', `${item.name} is critically low (${item.stock} units left)!`, { type: 'critical_stock', inventoryId: item.id }, 'danger');
                 }
             }
             
@@ -1393,31 +1692,48 @@ const handleSaveMissingItem = async (e) => {
         const { error } = await supabase.from('orders').update(dbPayload).eq('id', id);
         if (error) return { error };
 
-        if (added.length) await logOrderActivity(id, 'ITEM_ADDED', `${added.join(', ')} added to Order #${id}.`);
-        if (removed.length) await logOrderActivity(id, 'ITEM_REMOVED', `${removed.join(', ')} removed from Order #${id}.`);
-        if (updates.status !== undefined && String(updates.status) !== String(current.status)) {
-            await logOrderActivity(id, updates.status === 'Picked Up' ? 'COMPLETED' : 'STATUS_CHANGED', updates.status === 'Picked Up' ? `Order #${id} completed.` : `Status changed from ${current.status || 'Unknown'} to ${updates.status}.`);
+        if (added.length) {
+            const description = `${added.join(', ')} added to Order #${id}.`;
+            await logOrderActivity(id, 'ITEM_ADDED', description);
+            await notifyOrderEvent('➕ Item Added', description, { orderId: id, action: 'ITEM_ADDED' }, 'success');
         }
+        if (removed.length) {
+            const description = `${removed.join(', ')} removed from Order #${id}.`;
+            await logOrderActivity(id, 'ITEM_REMOVED', description);
+            await notifyOrderEvent('🗑️ Item Removed', description, { orderId: id, action: 'ITEM_REMOVED' }, 'danger');
+        }
+
+        const oldStatuses = oldDetails.itemStatuses || {};
+        const newStatuses = newDetails.itemStatuses || {};
+        const readyItems = Object.keys(newStatuses).filter(key => newStatuses[key] && !oldStatuses[key]);
+        const unreadyItems = Object.keys(oldStatuses).filter(key => oldStatuses[key] && !newStatuses[key]);
+        if (readyItems.length || unreadyItems.length) {
+            const readyDescription = readyItems.length
+                ? `${readyItems.length} item${readyItems.length === 1 ? '' : 's'} marked ready in Order #${id}.`
+                : `${unreadyItems.length} item${unreadyItems.length === 1 ? '' : 's'} marked not ready in Order #${id}.`;
+            await logOrderActivity(id, 'ITEM_STATUS_UPDATED', readyDescription);
+            await notifyOrderEvent(readyItems.length ? '✅ Item Ready' : '↩️ Item Not Ready', readyDescription, { orderId: id, action: 'ITEM_STATUS_UPDATED' }, readyItems.length ? 'success' : 'warning');
+        }
+
+        if (updates.status !== undefined && String(updates.status) !== String(current.status)) {
+            const isCompleted = updates.status === 'Picked Up';
+            const description = isCompleted ? `Order #${id} completed.` : `Status changed from ${current.status || 'Unknown'} to ${updates.status}.`;
+            await logOrderActivity(id, isCompleted ? 'COMPLETED' : 'STATUS_CHANGED', description);
+            await notifyOrderEvent(isCompleted ? '🎉 Order Completed' : `📋 Order ${updates.status}`, description, { orderId: id, action: isCompleted ? 'COMPLETED' : 'STATUS_CHANGED', status: updates.status }, isCompleted ? 'success' : 'info');
+        }
+
         if (updates.paymentMethod !== undefined || updates.paymentStatus !== undefined || updates.splitAmounts !== undefined) {
             const parts = [];
             if (updates.paymentStatus !== undefined) parts.push(`status: ${updates.paymentStatus}`);
             if (updates.paymentMethod !== undefined) parts.push(`method: ${updates.paymentMethod}`);
             if (updates.splitAmounts) parts.push(`split ₹${updates.splitAmounts.cash || 0} / ₹${updates.splitAmounts.online || 0}`);
-            await logOrderActivity(id, 'PAYMENT_UPDATED', `Payment updated (${parts.join(', ')}).`);
+            const description = `Payment updated (${parts.join(', ')}).`;
+            await logOrderActivity(id, 'PAYMENT_UPDATED', description);
+            await notifyOrderEvent('💳 Payment Updated', `Order #${id}: ${parts.join(', ')}`, { orderId: id, action: 'PAYMENT_UPDATED' }, 'info');
         }
-        if (
-            !added.length &&
-            !removed.length &&
-            updates.status === undefined &&
-            updates.paymentMethod === undefined &&
-            updates.paymentStatus === undefined &&
-            updates.splitAmounts === undefined
-        ) {
-            await logOrderActivity(
-                id,
-                'ORDER_UPDATED',
-                `Order #${id} details updated.`
-            );
+
+        if (!added.length && !removed.length && !readyItems.length && !unreadyItems.length && updates.status === undefined && updates.paymentMethod === undefined && updates.paymentStatus === undefined && updates.splitAmounts === undefined) {
+            await logOrderActivity(id, 'ORDER_UPDATED', `Order #${id} details updated.`);
         }
 
         setOrders(prev => prev.map(order => order.id === id ? { ...order, ...newDetails, id, status: dbPayload.status, total: dbPayload.total !== undefined ? dbPayload.total : current.total } : order));
@@ -1746,11 +2062,6 @@ const handleSaveMissingItem = async (e) => {
                 alert(result.error.message || 'Unable to update order.');
                 return;
             }
-
-            sendAdminNotification(
-                '🔄 Order Quantity Updated',
-                `Order #${order.displayId || order.id} quantity was changed.`
-            );
         });
     };
 
@@ -1843,11 +2154,6 @@ const handleSaveMissingItem = async (e) => {
                 alert(result.error.message || 'Unable to remove item from order.');
                 return;
             }
-
-            sendAdminNotification(
-                '🗑️ Item Removed',
-                `${removedItemName} removed from Order #${order.displayId || order.id}.`
-            );
         });
     };
 
@@ -1940,11 +2246,6 @@ const handleSaveMissingItem = async (e) => {
                 alert(result.error.message || 'Unable to add item to order.');
                 return;
             }
-
-            sendAdminNotification(
-                '✏️ Order Updated',
-                `${customItemForm.name} ×${qty} added to Order #${order.displayId || order.id} (Table: ${order.tableNo || 'Counter'}).`
-            );
 
             setAddingItemTo(null);
             setCustomItemForm({
@@ -2086,10 +2387,7 @@ const handleCreateBill = async () => {
                         `${addedItemText || 'Items'} added to existing Order #${dbOrder.id}.`
                     );
 
-                    sendAdminNotification(
-                        '🛒 Order Updated',
-                        `${addedItemText || 'Items added'} to Order #${dbOrder.id} by ${currentOperator.name}.`
-                    );
+                    await notifyOrderEvent('➕ Item Added', `${addedItemText || 'Items added'} to Order #${dbOrder.id} by ${currentOperator.name}.`, { orderId: dbOrder.id, action: 'ITEM_ADDED' }, 'success');
 
                     alert(`Successfully merged into active Order #${dbOrder.id}`);
                     resetPOS();
@@ -2145,10 +2443,7 @@ const handleCreateBill = async () => {
                     );
                 }
 
-                sendAdminNotification(
-                    '📦 New Bill Created',
-                    `Order #${newId || 'New'} created by ${currentOperator.name} for Table: ${billTableNo || 'Counter'} (₹${addedTotal}).`
-                );
+                await notifyOrderEvent('📦 New Bill Created', `Order #${newId || 'New'} created by ${currentOperator.name} for Table: ${billTableNo || 'Counter'} (₹${addedTotal}).`, { orderId: newId, action: 'CREATED' }, 'success');
 
                 resetPOS();
                 setActiveTab('orders');
@@ -2417,60 +2712,178 @@ const handleCreateBill = async () => {
         let cashIn = 0;
         let cashOut = 0;
 
-        // Add all Cash Orders
+        // ============================================================
+        // SYSTEM CASH FROM DATABASE-BACKED DATA
+        // Cash received from completed + paid orders
+        // ============================================================
         orders.forEach(o => {
             if (o.status === 'Picked Up' && o.paymentStatus === 'Paid') {
                 const pm = String(o.paymentMethod || 'Cash').toLowerCase();
-                if (pm === 'split') cashIn += Number(o.splitAmounts?.cash || 0);
-                else if (!pm.includes('online') && !pm.includes('upi') && !pm.includes('card')) cashIn += Number(o.total || 0);
+
+                if (pm === 'split') {
+                    cashIn += Number(o.splitAmounts?.cash || 0);
+                } else if (
+                    !pm.includes('online') &&
+                    !pm.includes('upi') &&
+                    !pm.includes('card')
+                ) {
+                    cashIn += Number(o.total || 0);
+                }
             }
         });
 
-        // Subtract all Cash Expenses
+        // Cash expenses
         expenses.forEach(e => {
-            if (e.mode === 'Cash') cashOut += Number(e.amount);
+            if (String(e.mode || '').toLowerCase() === 'cash') {
+                cashOut += Number(e.amount || 0);
+            }
         });
 
-        // Subtract all Cash Purchases
+        // Cash stock purchases
         purchasesData.forEach(p => {
-            if (p.payment_mode === 'Cash') cashOut += Number(p.total_cost);
+            if (String(p.payment_mode || '').toLowerCase() === 'cash') {
+                cashOut += Number(p.total_cost || 0);
+            }
         });
 
-        return cashIn - cashOut;
+        return Math.max(0, cashIn - cashOut);
     };
 
-   // NEW: Auto-load the last saved cash details when the page loads
-    useEffect(() => {
-        if (drawerCashRecords.length > 0 && drawerInput === '') {
-            setDrawerInput(String(drawerCashRecords[0].amount || ''));
-            setDrawerTakenOut(String(drawerCashRecords[0].taken_out || ''));
-            setDrawerTakenBy(drawerCashRecords[0].taken_by || '');
-        }
-    }, [drawerCashRecords, drawerInput]);
+    // ============================================================
+    // CASH DRAWER SNAPSHOT
+    // System Cash - cumulative Taken Out = Expected In Box
+    // Physical - Expected = Difference
+    // ============================================================
+    const getDrawerSnapshot = (physicalValue = drawerInput, takenValue = drawerTakenOut) => {
+        const systemCash = Math.max(0, Number(getCurrentDrawerCash()) || 0);
 
+        // Every saved drawer record stores ONLY the new amount taken
+        // during that entry, so summing them gives cumulative taken.
+        const savedTakenOut = drawerCashRecords.reduce(
+            (sum, record) => sum + (Number(record.taken_out) || 0),
+            0
+        );
+
+        const typedTakenOut =
+            takenValue !== '' && takenValue !== null && takenValue !== undefined
+                ? Math.max(0, Number(takenValue) || 0)
+                : 0;
+
+        const totalTakenOut = savedTakenOut + typedTakenOut;
+
+        const expectedInBox = systemCash - totalTakenOut;
+
+        const latestSavedPhysical = drawerCashRecords.find(
+            record =>
+                record.amount !== null &&
+                record.amount !== undefined &&
+                record.amount !== ''
+        );
+
+        const hasTypedPhysical =
+            physicalValue !== '' &&
+            physicalValue !== null &&
+            physicalValue !== undefined;
+
+        const physicalCounted = hasTypedPhysical
+            ? Math.max(0, Number(physicalValue) || 0)
+            : latestSavedPhysical
+                ? Math.max(0, Number(latestSavedPhysical.amount) || 0)
+                : null;
+
+        const hasPhysical = physicalCounted !== null;
+
+        const difference = hasPhysical
+            ? physicalCounted - expectedInBox
+            : null;
+
+        return {
+            systemCash,
+            savedTakenOut,
+            typedTakenOut,
+            totalTakenOut,
+            expectedInBox,
+            physicalCounted,
+            difference,
+            hasPhysical
+        };
+    };
+
+    // ============================================================
+    // SAVE ONE CASH-DRAWER ENTRY
+    // Each press of Enter / Save creates one history entry.
+    // Taken Out is incremental; Physical is the latest physical count.
+    // ============================================================
     const handleSaveDrawerCash = async (e) => {
         e.preventDefault();
-        // Prevent saving if both boxes are completely empty
-        if(!drawerInput && !drawerTakenOut) return; 
+
+        const hasTaken = drawerTakenOut !== '';
+        const hasPhysical = drawerInput !== '';
+
+        if (!hasTaken && !hasPhysical) {
+            return;
+        }
+
+        const beforeSave = getDrawerSnapshot();
+
+        // Keep the latest physical count when only Taken Out is entered.
+        const physicalToSave = beforeSave.physicalCounted;
 
         const payload = {
-            // If physical cash is left empty, it safely remembers the last saved amount
-            amount: drawerInput !== '' ? Number(drawerInput) : (drawerCashRecords[0]?.amount || 0),
-            taken_out: Number(drawerTakenOut) || 0,
-            taken_by: drawerTakenBy || 'Self',
+            // Existing column: physical cash left in box
+            amount: physicalToSave !== null ? physicalToSave : 0,
+
+            // IMPORTANT: this is only the NEW amount taken in this entry.
+            taken_out: hasTaken
+                ? Math.max(0, Number(drawerTakenOut) || 0)
+                : 0,
+
+            // Current signed-in operator
+            taken_by: currentOperator.name || 'Self',
+
             date: getFormattedDate(),
             time: getFormattedTime(),
-            timestamp: Date.now()
+            timestamp: Date.now(),
+
+            // New reconciliation snapshot columns.
+            // Run the SQL supplied below before using these fields.
+            system_cash: beforeSave.systemCash,
+            total_taken_out: beforeSave.totalTakenOut,
+            expected_cash: beforeSave.expectedInBox,
+            difference: beforeSave.difference ?? 0
         };
-        
-        await supabase.from('drawer_cash').insert([payload]);
-        
-        // THIS EMPTIES THE TEXT BOXES AFTER SAVING!
-        setDrawerInput('');
-        setDrawerTakenOut('');
-        setDrawerTakenBy('');
-        
-        fetchData(); // Refreshes the math engine and history table instantly
+
+        const { data, error } = await supabase
+            .from('drawer_cash')
+            .insert([payload])
+            .select()
+            .single();
+
+        if (error) {
+            console.error('Drawer cash save error:', error);
+            alert(`Could not save cash entry.\n\n${error.message}`);
+            return;
+        }
+
+        // Immediately add the saved record to the top of history.
+        if (data) {
+            setDrawerCashRecords(prev => [data, ...prev]);
+        }
+
+        // Clear the box(es) after successful Enter/Save.
+        if (hasTaken) {
+            setDrawerTakenOut('');
+        }
+
+        if (hasPhysical) {
+            setDrawerInput('');
+        }
+
+        // Keep the operator ready for the next entry.
+        setDrawerTakenBy(currentOperator.name || 'Self');
+
+        // Refresh orders/expenses/purchases and therefore system cash.
+        await fetchData();
     };
 
     const calculateDailyFinancials = () => {
@@ -2768,6 +3181,31 @@ const handleCreateBill = async () => {
         `}} />
 
         <audio ref={audioRef} loop src={alertTone} />
+
+        {/* --- CUSTOM VALO NOTIFICATION TOASTS --- */}
+        <div className="fixed top-4 right-4 z-[600] w-[min(92vw,380px)] space-y-2 pointer-events-none">
+            {appNotifications.map(note => (
+                <div key={note.id} className={`pointer-events-auto bg-slate-800/95 backdrop-blur-xl border rounded-2xl shadow-2xl p-4 animate-fade-in ${note.type === 'danger' ? 'border-red-500/40' : note.type === 'success' ? 'border-green-500/40' : note.type === 'warning' ? 'border-yellow-500/40' : 'border-cyan-500/30'}`}>
+                    <div className="flex items-start gap-3"><div className="text-xl">🔔</div><div className="min-w-0 flex-1"><p className="font-black text-white text-sm">{note.title}</p><p className="text-xs text-gray-300 mt-1">{note.body}</p></div><button type="button" onClick={() => setAppNotifications(prev => prev.filter(x => x.id !== note.id))} className="text-gray-500 hover:text-white">×</button></div>
+                </div>
+            ))}
+        </div>
+
+        {/* --- INSTALL VALO HELP --- */}
+        {showInstallHelp && (
+            <div className="fixed inset-0 z-[500] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setShowInstallHelp(false)}>
+                <div className="bg-slate-800 border border-white/10 rounded-3xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between mb-5"><div><h3 className="text-xl font-black text-white">Install VALO Admin</h3><p className="text-xs text-gray-400 mt-1">Use VALO like a real app.</p></div><button type="button" onClick={() => setShowInstallHelp(false)} className="text-gray-400 hover:text-white text-2xl">×</button></div>
+                    <div className="space-y-3 text-sm text-gray-300">
+                        <div className="bg-black/20 rounded-xl p-4"><b className="text-white">Chrome / Edge:</b><br/>Use <span className="text-cyan-400 font-bold">Install app</span> or <span className="text-cyan-400 font-bold">Add to Home screen</span> from the browser menu.</div>
+                        <div className="bg-black/20 rounded-xl p-4"><b className="text-white">Safari on iPhone/iPad:</b><br/>Share → <span className="text-cyan-400 font-bold">Add to Home Screen</span> → Add → open VALO from the Home Screen, then enable notifications.</div>
+                        <div className="bg-black/20 rounded-xl p-4"><b className="text-white">Safari on Mac:</b><br/>Use Safari's <span className="text-cyan-400 font-bold">Add to Dock</span> option when available.</div>
+                    </div>
+                    <button type="button" onClick={() => setShowInstallHelp(false)} className="w-full mt-5 bg-cyan-500 text-black font-black py-3 rounded-xl">Done</button>
+                </div>
+            </div>
+        )}
+
 {/* --- ADMIN OVERRIDE MODAL FOR MENU EDITS --- */}
             {actionAuth.open && (
                 <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
@@ -3736,127 +4174,347 @@ const handleCreateBill = async () => {
     {/* --- DRAWER CASH MODAL --- */}
             {drawerModal && (
                 <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
-                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-lg border border-white/10 shadow-2xl relative max-h-[95vh] overflow-y-auto">
-                        <button onClick={() => setDrawerModal(false)} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50">✕</button>
-                        <h3 className="text-xl font-bold mb-1 text-yellow-400">Nightly Cash Reconciliation</h3>
-                        <p className="text-xs text-gray-400 mb-6">Calculate exact change left in the box after taking out big notes.</p>
-                        
-                        {/* --- SMART MEMORY MATH ENGINE --- */}
+                    <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-4xl border border-white/10 shadow-2xl relative max-h-[95vh] overflow-y-auto">
+                        <button
+                            type="button"
+                            onClick={() => setDrawerModal(false)}
+                            className="absolute top-4 right-4 text-gray-400 hover:text-red-500 font-bold text-2xl transition z-50"
+                        >
+                            ✕
+                        </button>
+
+                        <div className="pr-10 mb-5">
+                            <h3 className="text-xl font-bold text-yellow-400">
+                                Cash Drawer Reconciliation
+                            </h3>
+                            <p className="text-xs text-gray-400 mt-1">
+                                System cash is calculated from paid cash sales minus cash expenses and cash purchases.
+                                Every amount taken out is accumulated automatically.
+                            </p>
+                        </div>
+
+                        {/* =====================================================
+                            LIVE CASH HIGHLIGHTS
+                           ===================================================== */}
                         {(() => {
-                            const systemCash = getCurrentDrawerCash();
-                            const lastRecord = drawerCashRecords[0]; 
-                            
-                            // 1. Calculate Lifetime Taken Out
-                            const dbTotalTakenOut = drawerCashRecords.reduce((sum, r) => sum + (Number(r.taken_out) || 0), 0);
-                            
-                            // 2. Add currently typed 'Taken Out' amount to the lifetime total
-                            const activeTakenOut = dbTotalTakenOut + (Number(drawerTakenOut) || 0);
-                            
-                            // 3. If typing physical cash, use it. Otherwise, remember the last saved amount!
-                            const actualPhysical = drawerInput !== '' ? Number(drawerInput) : (lastRecord ? Number(lastRecord.amount || 0) : 0);
-                            
-                            // 4. Do the final math
-                            const expectedPhysical = systemCash - activeTakenOut;
-                            const hasData = drawerInput !== '' || drawerTakenOut !== '' || !!lastRecord;
-                            const difference = hasData ? actualPhysical - expectedPhysical : 0;
-                            
-                            let diffColor = 'text-gray-500';
-                            let diffLabel = '';
-                            if (hasData) {
-                                if (difference > 0) { diffColor = 'text-green-400'; diffLabel = '(Extra / Overage)'; }
-                                else if (difference < 0) { diffColor = 'text-red-400'; diffLabel = '(Shortage)'; }
-                                else { diffColor = 'text-blue-400'; diffLabel = '(Perfect Match)'; }
+                            const summary = getDrawerSnapshot();
+
+                            let diffColor = 'text-gray-400';
+                            let diffLabel = 'Awaiting physical count';
+
+                            if (summary.hasPhysical) {
+                                if (summary.difference > 0) {
+                                    diffColor = 'text-green-400';
+                                    diffLabel = 'Extra / Overage';
+                                } else if (summary.difference < 0) {
+                                    diffColor = 'text-red-400';
+                                    diffLabel = 'Shortage';
+                                } else {
+                                    diffColor = 'text-blue-400';
+                                    diffLabel = 'Perfect Match';
+                                }
                             }
 
                             return (
-                                <div className="bg-black/30 p-4 rounded-xl border border-white/5 mb-6 shadow-inner space-y-3">
-                                    <div className="flex justify-between items-center">
-                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">1. System Total:</span>
-                                        <span className="text-xl font-black text-cyan-400">₹{systemCash}</span>
+                                <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 mb-6">
+
+                                    <div className="bg-black/30 border border-cyan-500/20 rounded-xl p-4">
+                                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                            System Cash
+                                        </p>
+                                        <p className="text-2xl font-black text-cyan-400 mt-1">
+                                            ₹{summary.systemCash}
+                                        </p>
+                                        <p className="text-[10px] text-gray-500 mt-1">
+                                            From database
+                                        </p>
                                     </div>
-                                    <div className="flex justify-between items-center border-t border-white/5 pt-3">
-                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">2. Total Taken Out:</span>
-                                        <span className="text-xl font-black text-orange-400">{activeTakenOut > 0 ? `- ₹${activeTakenOut}` : (hasData ? '₹0' : '-')}</span>
+
+                                    <div className="bg-black/30 border border-orange-500/20 rounded-xl p-4">
+                                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                            Total Taken Out
+                                        </p>
+                                        <p className="text-2xl font-black text-orange-400 mt-1">
+                                            ₹{summary.totalTakenOut}
+                                        </p>
+                                        <p className="text-[10px] text-gray-500 mt-1">
+                                            All saved withdrawals
+                                        </p>
                                     </div>
-                                    <div className="flex justify-between items-center border-t border-white/5 pt-3">
-                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">3. Expected In Box:</span>
-                                        <span className="text-xl font-black text-white">₹{expectedPhysical}</span>
+
+                                    <div className="bg-black/30 border border-white/10 rounded-xl p-4">
+                                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                            Expected In Box
+                                        </p>
+                                        <p className="text-2xl font-black text-white mt-1">
+                                            ₹{summary.expectedInBox}
+                                        </p>
+                                        <p className="text-[10px] text-gray-500 mt-1">
+                                            System cash − taken out
+                                        </p>
                                     </div>
-                                    <div className="flex justify-between items-center border-t border-white/5 pt-3">
-                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider">4. Physical Counted:</span>
-                                        <span className="text-xl font-black text-yellow-400">{hasData ? `₹${actualPhysical}` : '-'}</span>
+
+                                    <div className="bg-black/30 border border-yellow-500/20 rounded-xl p-4">
+                                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                            Physical Count
+                                        </p>
+                                        <p className="text-2xl font-black text-yellow-400 mt-1">
+                                            {summary.hasPhysical
+                                                ? `₹${summary.physicalCounted}`
+                                                : '—'}
+                                        </p>
+                                        <p className="text-[10px] text-gray-500 mt-1">
+                                            Latest counted cash
+                                        </p>
                                     </div>
-                                    <div className="flex justify-between items-center border-t border-white/10 pt-3 bg-black/40 p-2 rounded-lg mt-2 shadow-inner">
-                                        <span className="text-sm text-gray-400 font-bold uppercase tracking-wider flex flex-col">
-                                            Difference 
-                                            <span className={`text-[10px] ${diffColor}`}>{diffLabel}</span>
-                                        </span>
-                                        <span className={`text-2xl font-black ${diffColor}`}>
-                                            {hasData ? `${difference > 0 ? '+' : ''}₹${difference}` : '-'}
-                                        </span>
+
+                                    <div className="col-span-2 xl:col-span-1 bg-black/40 border border-white/10 rounded-xl p-4">
+                                        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                            Difference
+                                        </p>
+                                        <p className={`text-2xl font-black mt-1 ${diffColor}`}>
+                                            {summary.hasPhysical
+                                                ? `${summary.difference > 0 ? '+' : ''}₹${summary.difference}`
+                                                : '—'}
+                                        </p>
+                                        <p className={`text-[10px] mt-1 ${diffColor}`}>
+                                            {diffLabel}
+                                        </p>
                                     </div>
                                 </div>
                             );
                         })()}
 
-                        <form onSubmit={handleSaveDrawerCash} className="space-y-4 mb-6 border-b border-white/10 pb-6">
-                            <div className="grid grid-cols-2 gap-3">
+                        {/* =====================================================
+                            ENTRY FORM
+                           ===================================================== */}
+                        <form
+                            onSubmit={handleSaveDrawerCash}
+                            className="mb-6 border-b border-white/10 pb-6"
+                        >
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
                                 <div>
-                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">New Amount Taken Out (₹)</label>
-                                    <input type="number" placeholder="Big notes taken..." className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-orange-500 outline-none transition font-bold" value={drawerTakenOut} onChange={(e) => setDrawerTakenOut(e.target.value)} />
+                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">
+                                        Amount Taken Out (₹)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        inputMode="decimal"
+                                        enterKeyHint="done"
+                                        placeholder="Enter amount taken..."
+                                        className="w-full bg-black/50 border border-white/10 rounded-xl p-4 text-white focus:border-orange-500 outline-none transition font-bold text-lg"
+                                        value={drawerTakenOut}
+                                        onChange={(e) => setDrawerTakenOut(e.target.value)}
+                                    />
+                                    <p className="text-[10px] text-gray-500 mt-1">
+                                        Press Enter or Save. This amount is added to Total Taken Out.
+                                    </p>
                                 </div>
+
                                 <div>
-                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">Physical Chiller Left (₹)</label>
-                                    <input type="number" placeholder="Counted cash left..." className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-yellow-500 outline-none transition font-bold" value={drawerInput} onChange={(e) => setDrawerInput(e.target.value)} />
+                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">
+                                        Physical Cash In Box (₹)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        inputMode="decimal"
+                                        enterKeyHint="done"
+                                        placeholder="Count physical cash..."
+                                        className="w-full bg-black/50 border border-white/10 rounded-xl p-4 text-white focus:border-yellow-500 outline-none transition font-bold text-lg"
+                                        value={drawerInput}
+                                        onChange={(e) => setDrawerInput(e.target.value)}
+                                    />
+                                    <p className="text-[10px] text-gray-500 mt-1">
+                                        Press Enter or Save. The box clears after a successful save.
+                                    </p>
                                 </div>
                             </div>
-                            <div className="flex gap-3">
-                                <div className="flex-1">
-                                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider mb-1 block">Taken By (Name)</label>
-                                    <input type="text" placeholder="e.g. Owner, Manager..." className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none transition text-sm" value={drawerTakenBy} onChange={(e) => setDrawerTakenBy(e.target.value)} />
+
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-4">
+                                <div className="bg-black/20 rounded-xl px-4 py-3 border border-white/5">
+                                    <p className="text-[10px] text-gray-500 uppercase font-bold tracking-wider">
+                                        Entered By
+                                    </p>
+                                    <p className="text-sm font-bold text-cyan-400 mt-0.5">
+                                        {currentOperator.name || 'Self'}
+                                    </p>
                                 </div>
-                                <div className="flex items-end">
-                                    <button type="submit" className="bg-yellow-500 hover:bg-yellow-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg h-[46px]">Save</button>
-                                </div>
+
+                                <button
+                                    type="submit"
+                                    className="bg-yellow-500 hover:bg-yellow-400 text-black font-black px-8 py-3 rounded-xl transition shadow-lg"
+                                >
+                                    Save Entry
+                                </button>
                             </div>
                         </form>
 
-                        <h4 className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-3">Audit History</h4>
-                        <div className="overflow-y-auto h-[250px] bg-black/20 rounded-xl border border-white/5">
-                            <table className="w-full text-left text-sm text-gray-400">
-                                <thead className="bg-black/40 text-xs uppercase sticky top-0">
-                                    <tr>
-                                        <th className="p-3">Date</th>
-                                        <th className="p-3 text-right">Left In Box</th>
-                                        <th className="p-3 text-right">Taken Out</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {drawerCashRecords.map(r => (
-                                        <tr key={r.id} className="border-b border-white/5 hover:bg-white/5">
-                                            <td className="p-3 whitespace-nowrap">
-                                                {r.date} <span className="text-[10px] text-gray-500 block">{r.time}</span>
-                                                {r.taken_by && <span className="text-[10px] text-cyan-400 block mt-0.5">By: {r.taken_by}</span>}
-                                            </td>
-                                            <td className="p-3 text-right font-bold text-yellow-400">₹{r.amount}</td>
-                                            <td className="p-3 text-right">
-                                                {Number(r.taken_out) > 0 ? (
-                                                    <span className="text-orange-400 font-bold">-₹{r.taken_out}</span>
-                                                ) : (
-                                                    <span className="text-gray-600">-</span>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                            {drawerCashRecords.length === 0 && <div className="p-6 text-center text-gray-500 text-xs">No records yet.</div>}
+                        {/* =====================================================
+                            HISTORY
+                           ===================================================== */}
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                            <div>
+                                <h4 className="text-sm font-bold text-gray-300 uppercase tracking-widest">
+                                    Cash Drawer History
+                                </h4>
+                                <p className="text-[10px] text-gray-500 mt-1">
+                                    Each entry stores the amount taken in that entry and the reconciliation snapshot.
+                                </p>
+                            </div>
+
+                            <div className="text-right text-[10px] text-gray-500">
+                                {drawerCashRecords.length} entr{drawerCashRecords.length === 1 ? 'y' : 'ies'}
+                            </div>
+                        </div>
+
+                        <div className="overflow-y-auto max-h-[320px] bg-black/20 rounded-xl border border-white/5">
+                            {drawerCashRecords.length > 0 ? (
+                                (() => {
+                                    // Build immutable snapshots oldest → newest so cumulative
+                                    // taken-out values are correct for every history row.
+                                    const chronological = [...drawerCashRecords]
+                                        .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+
+                                    let runningTaken = 0;
+
+                                    const historyWithMath = chronological.map(record => {
+                                        runningTaken += Number(record.taken_out || 0);
+
+                                        const systemCashAtEntry =
+                                            record.system_cash !== undefined && record.system_cash !== null
+                                                ? Number(record.system_cash)
+                                                : Number(getCurrentDrawerCash() || 0);
+
+                                        const totalTakenAtEntry =
+                                            record.total_taken_out !== undefined && record.total_taken_out !== null
+                                                ? Number(record.total_taken_out)
+                                                : runningTaken;
+
+                                        const expectedAtEntry =
+                                            record.expected_cash !== undefined && record.expected_cash !== null
+                                                ? Number(record.expected_cash)
+                                                : systemCashAtEntry - totalTakenAtEntry;
+
+                                        const physicalAtEntry =
+                                            record.amount !== undefined && record.amount !== null
+                                                ? Number(record.amount)
+                                                : null;
+
+                                        const differenceAtEntry =
+                                            record.difference !== undefined && record.difference !== null
+                                                ? Number(record.difference)
+                                                : (
+                                                    physicalAtEntry !== null
+                                                        ? physicalAtEntry - expectedAtEntry
+                                                        : null
+                                                );
+
+                                        return {
+                                            ...record,
+                                            systemCashAtEntry,
+                                            totalTakenAtEntry,
+                                            expectedAtEntry,
+                                            physicalAtEntry,
+                                            differenceAtEntry
+                                        };
+                                    }).reverse();
+
+                                    return (
+                                        <table className="w-full text-left text-xs text-gray-400">
+                                            <thead className="bg-black/50 text-[9px] uppercase sticky top-0 z-10">
+                                                <tr>
+                                                    <th className="p-3">Date / By</th>
+                                                    <th className="p-3 text-right">System</th>
+                                                    <th className="p-3 text-right">Taken</th>
+                                                    <th className="p-3 text-right">Total Taken</th>
+                                                    <th className="p-3 text-right">Expected</th>
+                                                    <th className="p-3 text-right">Physical</th>
+                                                    <th className="p-3 text-right">Difference</th>
+                                                </tr>
+                                            </thead>
+
+                                            <tbody>
+                                                {historyWithMath.map(record => {
+                                                    const diff = record.differenceAtEntry;
+
+                                                    let differenceClass = 'text-gray-500';
+
+                                                    if (diff !== null) {
+                                                        if (diff > 0) differenceClass = 'text-green-400';
+                                                        else if (diff < 0) differenceClass = 'text-red-400';
+                                                        else differenceClass = 'text-blue-400';
+                                                    }
+
+                                                    return (
+                                                        <tr
+                                                            key={record.id || `${record.timestamp}-${record.time}`}
+                                                            className="border-b border-white/5 hover:bg-white/5"
+                                                        >
+                                                            <td className="p-3 whitespace-nowrap">
+                                                                <div className="text-white font-bold">
+                                                                    {record.date || '—'}
+                                                                </div>
+                                                                <div className="text-[10px] text-gray-500">
+                                                                    {record.time || '—'}
+                                                                </div>
+                                                                <div className="text-[10px] text-cyan-400 mt-0.5">
+                                                                    {record.taken_by || 'Self'}
+                                                                </div>
+                                                            </td>
+
+                                                            <td className="p-3 text-right font-bold text-cyan-400">
+                                                                ₹{record.systemCashAtEntry}
+                                                            </td>
+
+                                                            <td className="p-3 text-right font-bold text-orange-400">
+                                                                {Number(record.taken_out || 0) > 0
+                                                                    ? `-₹${Number(record.taken_out)}`
+                                                                    : '—'}
+                                                            </td>
+
+                                                            <td className="p-3 text-right font-bold text-orange-300">
+                                                                ₹{record.totalTakenAtEntry}
+                                                            </td>
+
+                                                            <td className="p-3 text-right font-bold text-white">
+                                                                ₹{record.expectedAtEntry}
+                                                            </td>
+
+                                                            <td className="p-3 text-right font-bold text-yellow-400">
+                                                                {record.physicalAtEntry !== null
+                                                                    ? `₹${record.physicalAtEntry}`
+                                                                    : '—'}
+                                                            </td>
+
+                                                            <td className={`p-3 text-right font-black ${differenceClass}`}>
+                                                                {diff === null
+                                                                    ? '—'
+                                                                    : `${diff > 0 ? '+' : ''}₹${diff}`}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    );
+                                })()
+                            ) : (
+                                <div className="p-10 text-center text-gray-500 text-sm">
+                                    No cash drawer entries yet.
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
             )}
-             
+
               {/* --- REVENUE DETAILS MODAL --- */}
+
             {selectedRevenueCategory && (() => {
                 let detailsList = [];
                 let categoryColor = 'text-white';
@@ -4066,30 +4724,7 @@ const handleCreateBill = async () => {
                             </div>
                         </div>
                          <button
-onClick={async () => {
-    try {
-        if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-            const api = (OneSignal && (OneSignal.initialize || OneSignal.Notifications)) ? OneSignal : (window.plugins?.OneSignal || null);
-            if (api?.Notifications?.requestPermission) {
-                const accepted = await api.Notifications.requestPermission(true);
-                alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.');
-            } else if (api?.promptForPushNotificationsWithUserResponse) {
-                api.promptForPushNotificationsWithUserResponse((accepted) => alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.'));
-            } else {
-                alert('OneSignal is not available in this APK. Rebuild the Android project after installing/syncing the plugin.');
-            }
-        } else {
-            window.OneSignalDeferred = window.OneSignalDeferred || [];
-            window.OneSignalDeferred.push(async function (WebOneSignal) {
-                try { await WebOneSignal.Slidedown.promptPush(); }
-                catch (err) { console.error('Web push prompt error:', err); }
-            });
-        }
-    } catch (err) {
-        console.error('Notification permission error:', err);
-        alert('Unable to enable notifications. Check Android notification permission in Settings.');
-    }
-}}
+onClick={requestValoNotificationPermission}
     className="p-2 bg-cyan-500/20 text-cyan-400 rounded-lg hover:bg-cyan-500 hover:text-black transition"
     title="Enable Notifications"
 >
@@ -4941,7 +5576,7 @@ onClick={async () => {
                                                 <span className="text-xl font-bold">₹{order.total}</span>
                                                  <div className="flex items-center gap-2">
                                                      <button type="button" onClick={() => openOrderActivity(order)} className="text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1 bg-purple-500/20 text-purple-400 hover:bg-purple-500 hover:text-white transition">🕘 Activity</button>
-                                                     
+                                                     
                                                  </div>
                                             </div>
                                         </div>
@@ -5503,30 +6138,7 @@ onClick={async () => {
                                 <h3 className="text-xl font-bold mb-2 text-white">Push Notifications</h3>
                                 <p className="text-sm text-gray-400 mb-4">Enable lock-screen notifications for new orders on this device.</p>
                                 <button
-    onClick={async () => {
-        try {
-            if (typeof Capacitor !== 'undefined' && Capacitor.isNativePlatform()) {
-                const api = (OneSignal && (OneSignal.initialize || OneSignal.Notifications)) ? OneSignal : (window.plugins?.OneSignal || null);
-                if (api?.Notifications?.requestPermission) {
-                    const accepted = await api.Notifications.requestPermission(true);
-                    alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.');
-                } else if (api?.promptForPushNotificationsWithUserResponse) {
-                    api.promptForPushNotificationsWithUserResponse((accepted) => alert(accepted ? 'Notifications enabled successfully!' : 'Notification permission was denied.'));
-                } else {
-                    alert('OneSignal is not available in this APK. Rebuild after installing/syncing the plugin.');
-                }
-            } else {
-                window.OneSignalDeferred = window.OneSignalDeferred || [];
-                window.OneSignalDeferred.push(async function (WebOneSignal) {
-                    try { await WebOneSignal.Slidedown.promptPush(); }
-                    catch (err) { console.error('Web push prompt error:', err); }
-                });
-            }
-        } catch (err) {
-            console.error('Notification permission error:', err);
-            alert('Unable to enable notifications. Check Android notification permission in Settings.');
-        }
-    }}
+    onClick={requestValoNotificationPermission}
     className="bg-blue-500 hover:bg-blue-400 text-white font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-blue-500/20 flex items-center gap-2"
 >
     🔔 Enable Notifications
