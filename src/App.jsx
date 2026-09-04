@@ -561,7 +561,7 @@ function AdminDashboard({ appMode, toggleMode, operator, onSwitchOperator }) {
   // Purchase States
     const [purchasesData, setPurchasesData] = useState([]);
     const [purchaseModal, setPurchaseModal] = useState({ open: false });
-    const [purchaseForm, setPurchaseForm] = useState({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash' });
+    const [purchaseForm, setPurchaseForm] = useState({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash', personalMoney: false });
     const [purchaseShowSugg, setPurchaseShowSugg] = useState(false);
     const [purchaseTabFilter, setPurchaseTabFilter] = useState('All');
     const [selectedPurchaseItem, setSelectedPurchaseItem] = useState(null);
@@ -592,6 +592,7 @@ function AdminDashboard({ appMode, toggleMode, operator, onSwitchOperator }) {
     const [expenseDesc, setExpenseDesc] = useState('');
     const [expenseAmount, setExpenseAmount] = useState('');
     const [expenseMode, setExpenseMode] = useState('Cash');
+    const [expensePersonalMoney, setExpensePersonalMoney] = useState(false);
     const [expenseDateFilter, setExpenseDateFilter] = useState(() => getFormattedDateForInput());
 
     // Barcode Scanning State
@@ -610,7 +611,7 @@ function AdminDashboard({ appMode, toggleMode, operator, onSwitchOperator }) {
     // New Modals
     const [staffModal, setStaffModal] = useState({ open: false });
 // Find this line around line 147:
-const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null, expenseType: 'item' });    const [staffShowSugg, setStaffShowSugg] = useState(false);
+const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null, expenseType: 'item', cashSource: 'Personal Money' });    const [staffShowSugg, setStaffShowSugg] = useState(false);
     const [isCustomStaff, setIsCustomStaff] = useState(false);
     const [activeStaff, setActiveStaff] = useState('');
 
@@ -1485,6 +1486,7 @@ const handleSaveStaffExpense = async (e) => {
         total: (isMoneyExpense ? 1 : Number(staffForm.qty)) * Number(staffForm.price),
         is_inv: isMoneyExpense ? false : staffForm.isInv,
         inv_id: isMoneyExpense ? null : staffForm.invId,
+        cash_source: isMoneyExpense ? (staffForm.cashSource || 'Personal Money') : null,
         date: getFormattedDate(),
         time: getFormattedTime(),
         timestamp: Date.now()
@@ -1505,7 +1507,7 @@ const handleSaveStaffExpense = async (e) => {
     await supabase.from('staff_expenses').insert([payload]);
     setStaffModal({ open: false });
     setActiveStaff(payload.staff_name);
-    setStaffForm({ staff_name: payload.staff_name, name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null, expenseType: 'item' });
+    setStaffForm({ staff_name: payload.staff_name, name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null, expenseType: 'item', cashSource: 'Personal Money' });
     fetchData();
 };
     const deleteStaffExpense = async (id) => {
@@ -1581,6 +1583,7 @@ const handleSaveMissingItem = async (e) => {
         unit_price: Number(purchaseForm.price),
         total_cost: totalCost,
         payment_mode: purchaseForm.mode,
+        personal_money: purchaseForm.personalMoney === true,
         date: getFormattedDate(),
         time: getFormattedTime(),
         timestamp: Date.now()
@@ -1624,12 +1627,13 @@ const handleSaveMissingItem = async (e) => {
         timestamp: payload.timestamp,
         amount: totalCost,
         description: `[Restock] ${payload.item_name} (Qty: ${payload.qty})`,
-        mode: payload.payment_mode
+        mode: payload.payment_mode,
+        personal_money: payload.personal_money === true
     };
     await supabase.from('expenses').insert([newExpense]);
 
     setPurchaseModal({ open: false });
-    setPurchaseForm({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash' });
+    setPurchaseForm({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash', personalMoney: false });
     fetchData();
     alert("Purchase recorded and synced successfully!");
 };
@@ -2687,7 +2691,8 @@ const handleCreateBill = async () => {
             timestamp: Date.now(),
             amount: Number(expenseAmount),
             description: expenseDesc,
-            mode: expenseMode
+            mode: expenseMode,
+            personal_money: expensePersonalMoney === true
         };
 
         const { error } = await supabase.from('expenses').insert([newExpense]);
@@ -2696,6 +2701,7 @@ const handleCreateBill = async () => {
         } else {
             setExpenseDesc('');
             setExpenseAmount('');
+            setExpensePersonalMoney(false);
             alert("Expense Saved!");
             fetchData();
         }
@@ -2712,10 +2718,7 @@ const handleCreateBill = async () => {
         let cashIn = 0;
         let cashOut = 0;
 
-        // ============================================================
-        // SYSTEM CASH FROM DATABASE-BACKED DATA
-        // Cash received from completed + paid orders
-        // ============================================================
+        // Cash received from completed + paid orders.
         orders.forEach(o => {
             if (o.status === 'Picked Up' && o.paymentStatus === 'Paid') {
                 const pm = String(o.paymentMethod || 'Cash').toLowerCase();
@@ -2732,17 +2735,31 @@ const handleCreateBill = async () => {
             }
         });
 
-        // Cash expenses
+        // Only NON-personal cash expenses reduce the Daily Box.
+        // Personal-money expenses are recorded for accounting but do not
+        // touch the physical hotel cash drawer.
+        //
+        // Stock purchases are already auto-logged into expenses, so they
+        // must NOT be subtracted separately here (avoids double counting).
         expenses.forEach(e => {
-            if (String(e.mode || '').toLowerCase() === 'cash') {
+            const isPersonal = e.personal_money === true;
+            const isCash = String(e.mode || '').toLowerCase() === 'cash';
+
+            if (!isPersonal && isCash) {
                 cashOut += Number(e.amount || 0);
             }
         });
 
-        // Cash stock purchases
-        purchasesData.forEach(p => {
-            if (String(p.payment_mode || '').toLowerCase() === 'cash') {
-                cashOut += Number(p.total_cost || 0);
+        // Staff direct money/advances reduce the Daily Cash Box ONLY when
+        // explicitly marked as paid from the hotel cash box.
+        staffExpenses.forEach(se => {
+            const isMoneyExpense =
+                String(se.item_name || '').toLowerCase() === 'money';
+            const isDailyCashBox =
+                String(se.cash_source || '').trim() === 'Daily Cash Box';
+
+            if (isMoneyExpense && isDailyCashBox) {
+                cashOut += Number(se.total || 0);
             }
         });
 
@@ -2893,21 +2910,29 @@ const handleCreateBill = async () => {
             if (o.status === 'Picked Up' && o.paymentStatus === 'Paid') {
                 const nDate = normalizeDateStr(o.date);
                 if (!nDate) return;
-                
+
                 if (!dailyData[nDate]) {
-                    dailyData[nDate] = { cashIn: 0, onlineIn: 0, cashOut: 0, onlineOut: 0 };
+                    dailyData[nDate] = {
+                        cashIn: 0,
+                        onlineIn: 0,
+                        cashOut: 0,
+                        onlineOut: 0,
+                        personalCashOut: 0,
+                        personalOnlineOut: 0
+                    };
                 }
-                
-                let cIn = 0; let oIn = 0;
+
+                let cIn = 0;
+                let oIn = 0;
                 const pm = String(o.paymentMethod || 'Cash').toLowerCase();
-                
+
                 if (pm === 'split') {
                     cIn = Number(o.splitAmounts?.cash || 0);
                     oIn = Number(o.splitAmounts?.online || 0);
                 } else if (pm.includes('online') || pm.includes('upi') || pm.includes('card')) {
-                    oIn = Number(o.total);
+                    oIn = Number(o.total || 0);
                 } else {
-                    cIn = Number(o.total); 
+                    cIn = Number(o.total || 0);
                 }
 
                 dailyData[nDate].cashIn += cIn;
@@ -2918,15 +2943,32 @@ const handleCreateBill = async () => {
         expenses.forEach(e => {
             const nDate = normalizeDateStr(e.date);
             if (!nDate) return;
-            
+
             if (!dailyData[nDate]) {
-                dailyData[nDate] = { cashIn: 0, onlineIn: 0, cashOut: 0, onlineOut: 0 };
+                dailyData[nDate] = {
+                    cashIn: 0,
+                    onlineIn: 0,
+                    cashOut: 0,
+                    onlineOut: 0,
+                    personalCashOut: 0,
+                    personalOnlineOut: 0
+                };
             }
-            
-            if (e.mode === 'Online') {
-                dailyData[nDate].onlineOut += Number(e.amount);
+
+            const amount = Number(e.amount || 0);
+            const isPersonal = e.personal_money === true;
+            const isOnline = String(e.mode || '').toLowerCase() === 'online';
+
+            if (isPersonal) {
+                if (isOnline) {
+                    dailyData[nDate].personalOnlineOut += amount;
+                } else {
+                    dailyData[nDate].personalCashOut += amount;
+                }
+            } else if (isOnline) {
+                dailyData[nDate].onlineOut += amount;
             } else {
-                dailyData[nDate].cashOut += Number(e.amount);
+                dailyData[nDate].cashOut += amount;
             }
         });
 
@@ -2943,14 +2985,19 @@ const handleCreateBill = async () => {
         let totalLifetimeOnlineIn = 0;
         let totalLifetimeCashOut = 0;
         let totalLifetimeOnlineOut = 0;
+        let totalLifetimePersonalCashOut = 0;
+        let totalLifetimePersonalOnlineOut = 0;
 
         const ledger = {};
 
         sortedDates.forEach(date => {
             const day = dailyData[date];
             const initialAmount = runningRemaining;
-            
-            const dayNet = (day.cashIn + day.onlineIn) - (day.cashOut + day.onlineOut);
+
+            // Personal-money expenses are NOT deducted from business balance.
+            const dayNet =
+                (day.cashIn + day.onlineIn) -
+                (day.cashOut + day.onlineOut);
 
             runningRemaining += dayNet;
 
@@ -2958,6 +3005,8 @@ const handleCreateBill = async () => {
             totalLifetimeOnlineIn += day.onlineIn;
             totalLifetimeCashOut += day.cashOut;
             totalLifetimeOnlineOut += day.onlineOut;
+            totalLifetimePersonalCashOut += day.personalCashOut;
+            totalLifetimePersonalOnlineOut += day.personalOnlineOut;
 
             ledger[date] = {
                 ...day,
@@ -2967,33 +3016,44 @@ const handleCreateBill = async () => {
         });
 
         const filterDateParts = expenseDateFilter.split('-');
-        const displayFilterDate = filterDateParts.length === 3 
-            ? `${filterDateParts[2]}/${filterDateParts[1]}/${filterDateParts[0]}` 
+        const displayFilterDate = filterDateParts.length === 3
+            ? `${filterDateParts[2]}/${filterDateParts[1]}/${filterDateParts[0]}`
             : getFormattedDate();
 
-        const todayStats = ledger[displayFilterDate] || { 
-            cashIn: 0, onlineIn: 0, cashOut: 0, onlineOut: 0, 
-            initialAmount: 0, remainingAmount: 0 
+        const todayStats = ledger[displayFilterDate] || {
+            cashIn: 0,
+            onlineIn: 0,
+            cashOut: 0,
+            onlineOut: 0,
+            personalCashOut: 0,
+            personalOnlineOut: 0,
+            initialAmount: 0,
+            remainingAmount: 0
         };
 
-        const dayExpenses = expenses.filter(e => normalizeDateStr(e.date) === displayFilterDate);
+        const dayExpenses = expenses.filter(
+            e => normalizeDateStr(e.date) === displayFilterDate
+        );
 
-       return {
+        return {
             dateStr: displayFilterDate,
             initialAmount: todayStats.initialAmount,
-            cashIn: todayStats.cashIn, 
+            cashIn: todayStats.cashIn,
             onlineIn: todayStats.onlineIn,
-            cashOut: todayStats.cashOut, 
+            cashOut: todayStats.cashOut,
             onlineOut: todayStats.onlineOut,
+            personalCashOut: todayStats.personalCashOut,
+            personalOnlineOut: todayStats.personalOnlineOut,
             totalRem: todayStats.remainingAmount,
 
-            lifetimeCashIn: totalLifetimeCashIn, 
+            lifetimeCashIn: totalLifetimeCashIn,
             lifetimeOnlineIn: totalLifetimeOnlineIn,
-            lifetimeCashOut: totalLifetimeCashOut, 
+            lifetimeCashOut: totalLifetimeCashOut,
             lifetimeOnlineOut: totalLifetimeOnlineOut,
-            
-           lifetimeCashRem: totalLifetimeCashIn - totalLifetimeCashOut,
-            
+            lifetimePersonalCashOut: totalLifetimePersonalCashOut,
+            lifetimePersonalOnlineOut: totalLifetimePersonalOnlineOut,
+
+            lifetimeCashRem: totalLifetimeCashIn - totalLifetimeCashOut,
             lifetimeOnlineRem: totalLifetimeOnlineIn - totalLifetimeOnlineOut,
             lifetimeTotalRem: runningRemaining,
 
@@ -3409,14 +3469,14 @@ const handleCreateBill = async () => {
                                 <div className="flex gap-2">
                                     <button
                                         type="button"
-                                        onClick={() => setStaffForm({...staffForm, expenseType: 'item', name: '', price: '', qty: 1, isInv: false, invId: null, menuId: null})}
+                                        onClick={() => setStaffForm({...staffForm, expenseType: 'item', name: '', price: '', qty: 1, isInv: false, invId: null, menuId: null, cashSource: 'Personal Money'})}
                                         className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition ${(!staffForm.expenseType || staffForm.expenseType === 'item') ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/20' : 'bg-black/30 text-gray-400 hover:text-white'}`}
                                     >
                                         📦 Inventory Item
                                     </button>
                                     <button
                                         type="button"
-                                        onClick={() => setStaffForm({...staffForm, expenseType: 'money', name: 'Money', price: '', qty: 1, isInv: false, invId: null, menuId: null})}
+                                        onClick={() => setStaffForm({...staffForm, expenseType: 'money', name: 'Money', price: '', qty: 1, isInv: false, invId: null, menuId: null, cashSource: 'Personal Money'})}
                                         className={`flex-1 py-2.5 rounded-lg text-xs font-bold transition ${staffForm.expenseType === 'money' ? 'bg-green-500 text-black shadow-lg shadow-green-500/20' : 'bg-black/30 text-gray-400 hover:text-white'}`}
                                     >
                                         💵 Direct Money / Advance
@@ -3476,6 +3536,23 @@ const handleCreateBill = async () => {
                                         disabled 
                                         className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-green-400 font-bold mt-1 cursor-not-allowed" 
                                     />
+                                </div>
+                            )}
+
+                            {staffForm.expenseType === 'money' && (
+                                <div>
+                                    <label className="text-xs text-gray-400">Cash Given From</label>
+                                    <select
+                                        className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-green-500"
+                                        value={staffForm.cashSource || 'Personal Money'}
+                                        onChange={e => setStaffForm({...staffForm, cashSource: e.target.value})}
+                                    >
+                                        <option value="Personal Money">👤 Personal Money</option>
+                                        <option value="Daily Cash Box">💵 Daily Cash Box</option>
+                                    </select>
+                                    <p className="text-[10px] text-gray-500 mt-1">
+                                        Personal Money does not reduce Daily Cash Box. Daily Cash Box reduces the hotel cash drawer.
+                                    </p>
                                 </div>
                             )}
 
@@ -3657,6 +3734,17 @@ const handleCreateBill = async () => {
                         <option value="Online">Online</option>
                     </select>
                 </div>
+
+                <label className="flex items-center gap-3 bg-black/30 border border-white/10 rounded-lg p-3 cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={purchaseForm.personalMoney === true}
+                        onChange={e => setPurchaseForm({...purchaseForm, personalMoney: e.target.checked})}
+                        className="w-4 h-4 accent-orange-500"
+                    />
+                    <span className="text-sm text-white font-bold">Paid with Personal Money</span>
+                    <span className="text-[10px] text-gray-500 ml-auto">Does not reduce Daily Box</span>
+                </label>
 
                 <div className="flex justify-between items-center bg-black/50 p-3 rounded-lg border border-white/5">
                     <span className="text-sm text-gray-400">Total Purchase Cost:</span>
@@ -4848,6 +4936,14 @@ onClick={requestValoNotificationPermission}
                                             <span className="text-gray-300 text-sm">Online Outcome</span>
                                             <span className="font-bold text-red-400">₹{financials.lifetimeOnlineOut}</span>
                                         </div>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Personal Cash Outcome</span>
+                                            <span className="font-bold text-yellow-400">₹{financials.lifetimePersonalCashOut}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-gray-300 text-sm">Personal Online Outcome</span>
+                                            <span className="font-bold text-yellow-400">₹{financials.lifetimePersonalOnlineOut}</span>
+                                        </div>
                                     </div>
                                     <div className="pt-4 border-t border-white/10 flex justify-between items-end">
                                         <span className="text-xs text-gray-500 uppercase font-bold">Total</span>
@@ -4914,22 +5010,34 @@ onClick={requestValoNotificationPermission}
                                         <option value="Cash">Cash</option>
                                         <option value="Online">Online</option>
                                     </select>
+
+                                    <label className="flex items-center gap-2 bg-black/20 border border-white/10 rounded-lg px-3 py-2 cursor-pointer md:max-w-[240px]">
+                                        <input
+                                            type="checkbox"
+                                            checked={expensePersonalMoney === true}
+                                            onChange={e => setExpensePersonalMoney(e.target.checked)}
+                                            className="w-4 h-4 accent-orange-500"
+                                        />
+                                        <span className="text-xs text-white font-bold">Paid with Personal Money</span>
+                                    </label>
+
                                     <button type="submit" className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg whitespace-nowrap">Add Expense</button>
                                 </form>
                             </div>
 
                             <div className="flex justify-between items-center mb-4">
                                 <h3 className="text-xl font-bold">Expense Ledger ({financials.dateStr})</h3>
-                                <button onClick={() => exportCSV(financials.dayExpenses.map(e => ({ Date: e.date, Time: e.time, Description: e.description, Mode: e.mode, Amount: e.amount })), `Expenses_${financials.dateStr.replace(/\//g,'_')}.csv`)} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
+                                <button onClick={() => exportCSV(financials.dayExpenses.map(e => ({ Date: e.date, Time: e.time, Description: e.description, Mode: e.mode, Personal_Money: e.personal_money === true ? 'YES' : 'NO', Amount: e.amount })), `Expenses_${financials.dateStr.replace(/\//g,'_')}.csv`)} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
                             </div>
                             
                             <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full max-w-[100vw] overflow-x-auto shadow-lg">
-                                <table className="w-full text-left text-sm text-gray-400 min-w-[600px]">
+                                <table className="w-full text-left text-sm text-gray-400 min-w-[700px]">
                                     <thead className="bg-black/30 text-white uppercase text-xs">
                                         <tr>
                                             <th className="p-4">Time</th>
                                             <th className="p-4">Description</th>
                                             <th className="p-4">Mode</th>
+                                            <th className="p-4">Personal Money</th>
                                             <th className="p-4 text-right">Amount</th>
                                             <th className="p-4 text-center">Action</th>
                                         </tr>
@@ -4941,6 +5049,11 @@ onClick={requestValoNotificationPermission}
                                                 <td className="p-4 text-white">{exp.description}</td>
                                                 <td className="p-4">
                                                     <span className={`px-2 py-1 rounded text-xs font-bold ${exp.mode === 'Online' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>{exp.mode}</span>
+                                                </td>
+                                                <td className="p-4">
+                                                    {exp.personal_money === true
+                                                        ? <span className="px-2 py-1 rounded text-xs font-bold bg-yellow-500/20 text-yellow-400">YES</span>
+                                                        : <span className="px-2 py-1 rounded text-xs font-bold bg-gray-500/20 text-gray-400">NO</span>}
                                                 </td>
                                                 <td className="p-4 text-red-400 font-bold text-right font-mono">-₹{exp.amount}</td>
                                                 <td className="p-4 text-center">
@@ -5140,6 +5253,7 @@ onClick={requestValoNotificationPermission}
                                                                     <th className="p-4">Item Taken</th>
                                                                     <th className="p-4 text-center">Qty</th>
                                                                     <th className="p-4 text-right">Rate</th>
+                                                                    <th className="p-4">Cash Source</th>
                                                                     <th className="p-4 text-right">Total</th>
                                                                     <th className="p-4"></th>
                                                                 </tr>
@@ -5154,6 +5268,19 @@ onClick={requestValoNotificationPermission}
                                                                         </td>
                                                                         <td className="p-4 text-center font-bold">{exp.qty}x</td>
                                                                         <td className="p-4 text-right text-gray-500 text-xs">@₹{exp.price}</td>
+                                                                        <td className="p-4">
+                                                                            {String(exp.item_name || '').toLowerCase() === 'money' ? (
+                                                                                <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
+                                                                                    exp.cash_source === 'Daily Cash Box'
+                                                                                        ? 'bg-orange-500/20 text-orange-400'
+                                                                                        : 'bg-cyan-500/20 text-cyan-400'
+                                                                                }`}>
+                                                                                    {exp.cash_source === 'Daily Cash Box' ? '💵 Daily Cash Box' : '👤 Personal Money'}
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="text-gray-600 text-xs">—</span>
+                                                                            )}
+                                                                        </td>
                                                                         <td className="p-4 text-red-400 font-bold text-right font-mono">-₹{exp.total}</td>
                                                                         <td className="p-4 text-center">
                                                                             <button onClick={() => deleteStaffExpense(exp.id)} className="text-gray-600 hover:text-red-400 transition" title="Delete Record">✕</button>
