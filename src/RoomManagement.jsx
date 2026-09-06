@@ -143,28 +143,101 @@ export default function RoomManagement({ appMode, toggleMode }) {
     const [selectedRevenueCategory, setSelectedRevenueCategory] = useState(null);
     const [transactionPage, setTransactionPage] = useState(1);
 
-    useEffect(() => {
-        fetchRoomData();
-        const channel = supabase.channel('room-updates')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'room_bookings' }, fetchRoomData)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'room_expenses' }, fetchRoomData)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settings' }, fetchRoomData)
-            .subscribe();
-        return () => supabase.removeChannel(channel);
-    }, []);
+    // ============================================================
+    // LOW-EGRESS ROOM DATA SYNC
+    // Initial load fetches each room table once. Realtime changes are
+    // applied directly to local state instead of re-downloading all
+    // bookings, expenses and settings for every change.
+    // ============================================================
+    const fetchRoomBookings = async () => {
+        const { data } = await supabase.from('room_bookings').select('*').order('booking_date', { ascending: true });
+        if (data) setBookings(data);
+    };
 
-    const fetchRoomData = async () => {
-        const { data: bData } = await supabase.from('room_bookings').select('*').order('booking_date', { ascending: true });
-        if (bData) setBookings(bData);
-        const { data: eData } = await supabase.from('room_expenses').select('*').order('timestamp', { ascending: false });
-        if (eData) setExpenses(eData);
-        const { data: sData } = await supabase.from('room_settings').select('*');
-        if (sData) {
+    const fetchRoomExpenses = async () => {
+        const { data } = await supabase.from('room_expenses').select('*').order('timestamp', { ascending: false });
+        if (data) setExpenses(data);
+    };
+
+    const fetchRoomSettings = async () => {
+        const { data } = await supabase.from('room_settings').select('*');
+        if (data) {
             const prices = {};
-            sData.forEach(row => { prices[row.room_no] = Number(row.price_per_slot); });
+            data.forEach(row => { prices[row.room_no] = Number(row.price_per_slot); });
             setRoomPrices(prev => ({ ...prev, ...prices }));
         }
     };
+
+    const fetchRoomData = async () => {
+        await Promise.all([fetchRoomBookings(), fetchRoomExpenses(), fetchRoomSettings()]);
+    };
+
+    const applyRoomRealtimeRow = (table, eventType, newRow, oldRow) => {
+        const row = eventType === 'DELETE' ? oldRow : newRow;
+        if (!row) return;
+        const rowId = row.id;
+
+        if (table === 'room_bookings') {
+            if (eventType === 'DELETE') {
+                setBookings(prev => prev.filter(item => String(item.id) !== String(rowId)));
+                return;
+            }
+            setBookings(prev => {
+                const index = prev.findIndex(item => String(item.id) === String(rowId));
+                const next = [...prev];
+                if (index === -1) next.push(row);
+                else next[index] = { ...next[index], ...row };
+                next.sort((a, b) => {
+                    const ad = String(a.booking_date || '');
+                    const bd = String(b.booking_date || '');
+                    if (ad !== bd) return ad.localeCompare(bd);
+                    return String(a.slot_start || '').localeCompare(String(b.slot_start || ''));
+                });
+                return next;
+            });
+            return;
+        }
+
+        if (table === 'room_expenses') {
+            if (eventType === 'DELETE') {
+                setExpenses(prev => prev.filter(item => String(item.id) !== String(rowId)));
+                return;
+            }
+            setExpenses(prev => {
+                const index = prev.findIndex(item => String(item.id) === String(rowId));
+                const next = [...prev];
+                if (index === -1) next.push(row);
+                else next[index] = { ...next[index], ...row };
+                next.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+                return next;
+            });
+            return;
+        }
+
+        if (table === 'room_settings') {
+            if (eventType === 'DELETE') return;
+            if (row.room_no) {
+                setRoomPrices(prev => ({ ...prev, [row.room_no]: Number(row.price_per_slot) }));
+            }
+        }
+    };
+
+    useEffect(() => {
+        fetchRoomData();
+        const channel = supabase
+            .channel('room-updates')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'room_bookings' }, payload =>
+                applyRoomRealtimeRow(payload?.table, payload?.eventType, payload?.new, payload?.old)
+            )
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'room_expenses' }, payload =>
+                applyRoomRealtimeRow(payload?.table, payload?.eventType, payload?.new, payload?.old)
+            )
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'room_settings' }, payload =>
+                applyRoomRealtimeRow(payload?.table, payload?.eventType, payload?.new, payload?.old)
+            )
+            .subscribe();
+        return () => supabase.removeChannel(channel);
+    }, []);
 
     useEffect(() => {
         const interval = setInterval(() => {
@@ -287,10 +360,11 @@ export default function RoomManagement({ appMode, toggleMode }) {
             updates.split_cash = splitData.cash;
             updates.split_online = splitData.online;
         }
-        await supabase.from('room_bookings').update(updates).eq('id', bookingId);
+        const { error } = await supabase.from('room_bookings').update(updates).eq('id', bookingId);
+        if (error) { alert(error.message); return; }
+        setBookings(prev => prev.map(b => String(b.id) === String(bookingId) ? { ...b, ...updates } : b));
         setCheckoutModal({ open: false, bookingId: null, total: 0, advance: 0 });
         setIsSplitMode(false);
-        fetchRoomData();
     };
 
     const handleAddExpense = async (e) => {
@@ -305,9 +379,10 @@ export default function RoomManagement({ appMode, toggleMode }) {
             time: d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
             timestamp: Date.now()
         };
-        await supabase.from('room_expenses').insert([payload]);
+        const { data, error } = await supabase.from('room_expenses').insert([payload]).select('*').single();
+        if (error) { alert(error.message); return; }
+        if (data) setExpenses(prev => [data, ...prev.filter(item => String(item.id) !== String(data.id))]);
         setExpenseForm({ desc: '', amount: '', mode: 'Cash' });
-        fetchRoomData();
     };
 
     const calculateDailyFinancials = () => {

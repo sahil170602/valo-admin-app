@@ -1090,52 +1090,268 @@ useEffect(() => {
         }
     };
 
-    const fetchData = async () => {
+    // ============================================================
+    // DATA LOADERS
+    // Initial load fetches all dashboard data once. After that, mutations
+    // use targeted table refreshes instead of re-downloading every table.
+    // This preserves the existing functionality while substantially reducing
+    // Supabase egress.
+    // ============================================================
+    const fetchOrders = async () => {
         const { data: ord } = await supabase.from('orders').select('*').order('id', { ascending: false });
-        if(ord) {
+        if (ord) {
             const formatted = ord.map(o => ({ ...o.order_details, id: o.id, status: o.status, tableNo: o.table_no, total: o.total }));
             setOrders(formatted);
             const hasPending = formatted.some(o => o.status === 'Received');
-            if(hasPending) playAlert(); else stopAlert();
+            if (hasPending) playAlert(); else stopAlert();
         }
-        const { data: usr } = await supabase.from('users').select('*').order('joined_at', { ascending: false });
-        if(usr) setUsers(usr);
-        
-        const { data: cats } = await supabase.from('categories').select('*').order('id', { ascending: true });
-        if(cats) setCategories(cats);
-        
-        const { data: items } = await supabase.from('menu_items').select('*').order('id', { ascending: true });
-        if(items) setMenuItems(items);
-        
-        const { data: moms } = await supabase.from('moments').select('*').order('id', { ascending: false });
-        if(moms) setMoments(moms);
+    };
 
-        const { data: inv } = await supabase.from('inventory_items').select('*').order('name', { ascending: true });
-        if(inv) setInventoryItems(inv);
+    const fetchUsers = async () => {
+        const { data } = await supabase.from('users').select('*').order('joined_at', { ascending: false });
+        if (data) setUsers(data);
+    };
 
-        const { data: exp } = await supabase.from('expenses').select('*').order('timestamp', { ascending: false });
-        if(exp) setExpenses(exp);
+    const fetchCategories = async () => {
+        const { data } = await supabase.from('categories').select('*').order('id', { ascending: true });
+        if (data) setCategories(data);
+    };
 
-        const { data: se } = await supabase.from('staff_expenses').select('*').order('timestamp', { ascending: false });
-        if(se) setStaffExpenses(se);
+    const fetchMenuItems = async () => {
+        const { data } = await supabase.from('menu_items').select('*').order('id', { ascending: true });
+        if (data) setMenuItems(data);
+    };
 
-        const { data: mi } = await supabase.from('missing_items').select('*').order('timestamp', { ascending: false });
-        if(mi) setMissingItemsData(mi);
+    const fetchMoments = async () => {
+        const { data } = await supabase.from('moments').select('*').order('id', { ascending: false });
+        if (data) setMoments(data);
+    };
 
-        const { data: pur } = await supabase.from('stock_purchases').select('*').order('timestamp', { ascending: false });
-        if(pur) setPurchasesData(pur);
+    const fetchInventory = async () => {
+        const { data } = await supabase.from('inventory_items').select('*').order('name', { ascending: true });
+        if (data) setInventoryItems(data);
+    };
 
-        const { data: dc } = await supabase.from('drawer_cash').select('*').order('timestamp', { ascending: false });
-        if(dc) setDrawerCashRecords(dc);
+    const fetchExpenses = async () => {
+        const { data } = await supabase.from('expenses').select('*').order('timestamp', { ascending: false });
+        if (data) setExpenses(data);
+    };
+
+    const fetchStaffExpenses = async () => {
+        const { data } = await supabase.from('staff_expenses').select('*').order('timestamp', { ascending: false });
+        if (data) setStaffExpenses(data);
+    };
+
+    const fetchMissingItems = async () => {
+        const { data } = await supabase.from('missing_items').select('*').order('timestamp', { ascending: false });
+        if (data) setMissingItemsData(data);
+    };
+
+    const fetchPurchases = async () => {
+        const { data } = await supabase.from('stock_purchases').select('*').order('timestamp', { ascending: false });
+        if (data) setPurchasesData(data);
+    };
+
+    const fetchDrawerCash = async () => {
+        const { data } = await supabase.from('drawer_cash').select('*').order('timestamp', { ascending: false });
+        if (data) setDrawerCashRecords(data);
+    };
+
+    const fetchData = async () => {
+        await Promise.all([
+            fetchOrders(),
+            fetchUsers(),
+            fetchCategories(),
+            fetchMenuItems(),
+            fetchMoments(),
+            fetchInventory(),
+            fetchExpenses(),
+            fetchStaffExpenses(),
+            fetchMissingItems(),
+            fetchPurchases(),
+            fetchDrawerCash()
+        ]);
     };
 
 
+    // ============================================================
+    // LOW-EGRESS REALTIME SYNC
+    // IMPORTANT: Do NOT call fetchData() for every realtime event.
+    // The old listener re-downloaded every table whenever ANY row
+    // changed, which can create very large Supabase egress usage.
+    // We now apply the realtime row directly to local React state.
+    // ============================================================
+    const applyRealtimeRow = (table, eventType, newRow, oldRow) => {
+        const row = eventType === 'DELETE' ? oldRow : newRow;
+        const rowId = row?.id;
+
+        const upsertById = (setter, nextRow, sortFn = null) => {
+            if (!nextRow || rowId === undefined || rowId === null) return;
+            setter(prev => {
+                const index = prev.findIndex(item => String(item.id) === String(rowId));
+
+                if (eventType === 'DELETE') {
+                    if (index === -1) return prev;
+                    return prev.filter(item => String(item.id) !== String(rowId));
+                }
+
+                const next = [...prev];
+                if (index === -1) next.push(nextRow);
+                else next[index] = { ...next[index], ...nextRow };
+
+                return sortFn ? next.sort(sortFn) : next;
+            });
+        };
+
+        switch (table) {
+            case 'orders': {
+                if (!row) return;
+
+                if (eventType === 'DELETE') {
+                    setOrders(prev => prev.filter(item => String(item.id) !== String(rowId)));
+                    return;
+                }
+
+                const formatted = {
+                    ...(row.order_details || {}),
+                    id: row.id,
+                    status: row.status,
+                    tableNo: row.table_no,
+                    total: row.total
+                };
+
+                setOrders(prev => {
+                    const index = prev.findIndex(item => String(item.id) === String(rowId));
+                    const next = [...prev];
+
+                    if (index === -1) next.unshift(formatted);
+                    else next[index] = { ...next[index], ...formatted };
+
+                    next.sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+
+                    const hasPending = next.some(item => item.status === 'Received');
+                    if (hasPending) playAlert();
+                    else stopAlert();
+
+                    return next;
+                });
+                return;
+            }
+
+            case 'users':
+                upsertById(
+                    setUsers,
+                    row,
+                    (a, b) => String(b.joined_at || '').localeCompare(String(a.joined_at || ''))
+                );
+                return;
+
+            case 'categories':
+                upsertById(
+                    setCategories,
+                    row,
+                    (a, b) => Number(a.id || 0) - Number(b.id || 0)
+                );
+                return;
+
+            case 'menu_items':
+                upsertById(
+                    setMenuItems,
+                    row,
+                    (a, b) => Number(a.id || 0) - Number(b.id || 0)
+                );
+                return;
+
+            case 'moments':
+                upsertById(
+                    setMoments,
+                    row,
+                    (a, b) => Number(b.id || 0) - Number(a.id || 0)
+                );
+                return;
+
+            case 'inventory_items':
+                upsertById(
+                    setInventoryItems,
+                    row,
+                    (a, b) => String(a.name || '').localeCompare(String(b.name || ''))
+                );
+                return;
+
+            case 'expenses':
+                upsertById(
+                    setExpenses,
+                    row,
+                    (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0)
+                );
+                return;
+
+            case 'staff_expenses':
+                upsertById(
+                    setStaffExpenses,
+                    row,
+                    (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0)
+                );
+                return;
+
+            case 'missing_items':
+                upsertById(
+                    setMissingItemsData,
+                    row,
+                    (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0)
+                );
+                return;
+
+            case 'stock_purchases':
+                upsertById(
+                    setPurchasesData,
+                    row,
+                    (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0)
+                );
+                return;
+
+            case 'drawer_cash':
+                upsertById(
+                    setDrawerCashRecords,
+                    row,
+                    (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0)
+                );
+                return;
+
+            default:
+                // Tables that do not feed the main dashboard state are
+                // intentionally ignored here. They can still be loaded
+                // explicitly by their existing handlers.
+                return;
+        }
+    };
+
     useEffect(() => {
         fetchData();
-        const channel = supabase.channel('admin-dashboard')
-            .on('postgres_changes', { event: '*', schema: 'public' }, () => fetchData())
+
+        const channel = supabase
+            .channel('admin-dashboard')
+            .on(
+                'postgres_changes',
+                { event: '*', schema: 'public' },
+                payload => {
+                    // Realtime already gives us the changed row. Updating
+                    // local state directly avoids re-downloading every
+                    // dashboard table for a single database change.
+                    applyRealtimeRow(
+                        payload?.table,
+                        payload?.eventType,
+                        payload?.new,
+                        payload?.old
+                    );
+                }
+            )
             .subscribe();
-        return () => { supabase.removeChannel(channel); stopAlert(); };
+
+        return () => {
+            supabase.removeChannel(channel);
+            stopAlert();
+        };
     }, []);
 
     useEffect(() => { if (currentOperator.role === 'admin' && activeTab === 'settings') fetchStaffAccounts(); }, [activeTab, currentOperator.role]);
@@ -1155,7 +1371,7 @@ useEffect(() => {
             const { error } = await supabase.from('categories').insert([{ name, image: imgBase64 }]);
             if (error) alert(error.message);
             setCatModal(false);
-            fetchData();
+            await fetchCategories();
         };
 
         if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeSave });
@@ -1166,7 +1382,7 @@ useEffect(() => {
         const executeDelete = async () => {
             if(confirm('Delete this category?')) {
                 await supabase.from('categories').delete().eq('id', id);
-                fetchData();
+                await fetchCategories();
             }
         };
         if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeDelete });
@@ -1202,7 +1418,7 @@ useEffect(() => {
                 await supabase.from('menu_items').update(payload).eq('id', targetId);
             }
             setItemModal({open: false, mode: 'add', data: null});
-            fetchData();
+            await fetchMenuItems();
         };
 
         if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeSave });
@@ -1213,7 +1429,7 @@ useEffect(() => {
         const executeDelete = async () => {
             if(confirm('Delete this menu item?')) {
                 await supabase.from('menu_items').delete().eq('id', id);
-                fetchData();
+                await fetchMenuItems();
             }
         };
         if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeDelete });
@@ -1223,7 +1439,7 @@ useEffect(() => {
     const toggleSpecial = async (item) => {
         const executeToggle = async () => {
             await supabase.from('menu_items').update({ is_special: !item.is_special }).eq('id', item.id);
-            fetchData();
+            await fetchMenuItems();
         };
         if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeToggle });
         else executeToggle();
@@ -1232,7 +1448,7 @@ useEffect(() => {
     const toggleStock = async (item) => {
         const executeToggle = async () => {
             await supabase.from('menu_items').update({ in_stock: !item.in_stock }).eq('id', item.id);
-            fetchData();
+            await fetchMenuItems();
         };
         if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeToggle });
         else executeToggle();
@@ -1254,13 +1470,13 @@ useEffect(() => {
             await supabase.from('moments').update(payload).eq('id', momentModal.data.id);
         }
         setMomentModal({open: false, mode: 'add', data: null});
-        fetchData();
+        await fetchMoments();
     };
 
     const deleteMoment = async (id) => {
         if(confirm('Delete this moment?')) {
             await supabase.from('moments').delete().eq('id', id);
-            fetchData();
+            await fetchMoments();
         }
     };
 
@@ -1312,7 +1528,7 @@ useEffect(() => {
         }
 
         setInvModal({ open: false, mode: 'add', data: null });
-        await fetchData();
+        await fetchInventory();
         return;
     }
 
@@ -1457,13 +1673,13 @@ useEffect(() => {
     }
 
     setInvModal({ open: false, mode: 'add', data: null });
-    await fetchData();
+    await fetchInventory();
 };
 
     const deleteInventoryItem = async (id) => {
         if(confirm('Delete this inventory item?')) {
             await supabase.from('inventory_items').delete().eq('id', id);
-            fetchData();
+            await fetchInventory();
         }
     };
 
@@ -1508,18 +1724,18 @@ const handleSaveStaffExpense = async (e) => {
     setStaffModal({ open: false });
     setActiveStaff(payload.staff_name);
     setStaffForm({ staff_name: payload.staff_name, name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null, expenseType: 'item', cashSource: 'Personal Money' });
-    fetchData();
+    await fetchStaffExpenses();
 };
     const deleteStaffExpense = async (id) => {
         if(confirm('Remove this record? (Note: Stock is NOT refunded automatically)')) {
             await supabase.from('staff_expenses').delete().eq('id', id);
-            fetchData();
+            await fetchStaffExpenses();
         }
     };
     const deleteMissingItem = async (id) => {
     if (confirm('Are you sure you want to delete this loss/defect record? (Note: Stock is NOT automatically refunded)')) {
         await supabase.from('missing_items').delete().eq('id', id);
-        fetchData();
+        await fetchMissingItems();
     }
 };
 
@@ -1558,13 +1774,13 @@ const handleSaveMissingItem = async (e) => {
         await supabase.from('missing_items').insert([payload]);
         setMissingModal({ open: false });
         setMissingForm({ name: '', qty: 1, price: '', isInv: false, invId: null, menuId: null });
-        fetchData();
+        await fetchMissingItems();
     };
 
     const deletePurchase = async (id) => {
         if(confirm('Are you sure you want to delete this purchase record? (Note: This does not automatically reverse inventory stock or expense ledgers)')) {
             await supabase.from('stock_purchases').delete().eq('id', id);
-            fetchData();
+            await fetchPurchases();
         }
     };
 
@@ -1634,7 +1850,7 @@ const handleSaveMissingItem = async (e) => {
 
     setPurchaseModal({ open: false });
     setPurchaseForm({ type: 'Inventory', name: '', qty: 1, price: '', invId: null, mode: 'Cash', personalMoney: false });
-    fetchData();
+    await Promise.all([fetchPurchases(), fetchExpenses(), fetchInventory()]);
     alert("Purchase recorded and synced successfully!");
 };
 
@@ -1873,7 +2089,7 @@ const handleSaveMissingItem = async (e) => {
 
         alert("Order Successfully Updated!");
         setEditHistoryModal({ open: false, order: null, tempMethod: 'Cash' });
-        fetchData(); 
+        await Promise.all([fetchOrders(), fetchInventory()]); 
     };
 
    const handleAdminMarkPaid = async (method, splitAmounts = null) => {
@@ -2396,7 +2612,7 @@ const handleCreateBill = async () => {
                     alert(`Successfully merged into active Order #${dbOrder.id}`);
                     resetPOS();
                     setActiveTab('orders');
-                    fetchData();
+                    await Promise.all([fetchOrders(), fetchInventory()]);
                 }
             }
         } else {
@@ -2451,7 +2667,7 @@ const handleCreateBill = async () => {
 
                 resetPOS();
                 setActiveTab('orders');
-                fetchData();
+                await Promise.all([fetchOrders(), fetchInventory()]);
             }
         }
     };
@@ -2703,14 +2919,14 @@ const handleCreateBill = async () => {
             setExpenseAmount('');
             setExpensePersonalMoney(false);
             alert("Expense Saved!");
-            fetchData();
+            await fetchExpenses();
         }
     };
 
     const deleteExpense = async (id) => {
         if(confirm("Are you sure you want to delete this expense?")) {
             await supabase.from('expenses').delete().eq('id', id);
-            fetchData();
+            await fetchExpenses();
         }
     };
 
@@ -2899,8 +3115,7 @@ const handleCreateBill = async () => {
         // Keep the operator ready for the next entry.
         setDrawerTakenBy(currentOperator.name || 'Self');
 
-        // Refresh orders/expenses/purchases and therefore system cash.
-        await fetchData();
+        // The drawer record is already added locally; no full dashboard refresh is needed.
     };
 
     const calculateDailyFinancials = () => {
