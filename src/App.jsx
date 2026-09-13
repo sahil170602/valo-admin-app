@@ -626,6 +626,26 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
     const [splitCash, setSplitCash] = useState('');
     const [splitOnline, setSplitOnline] = useState('');
 
+    // UPI QR payment state. The QR contains a standard UPI payment URI
+    // with the exact amount, so supported UPI apps pre-fill the amount.
+    const [paymentQrModal, setPaymentQrModal] = useState({
+        open: false,
+        amount: 0,
+        orderId: null,
+        splitAmounts: null,
+        source: null,
+        historyPayload: null
+    });
+
+    // UPI ID is stored centrally in Supabase so every admin device uses the same QR destination.
+    const [valoUpiId, setValoUpiId] = useState('');
+    const [menuRecipes, setMenuRecipes] = useState({});
+    const [recipeModal, setRecipeModal] = useState({ open: false, menuItem: null, rows: [] });
+    const [recipeSearch, setRecipeSearch] = useState({});
+    const [removeItemConfirm, setRemoveItemConfirm] = useState({ open: false, itemName: '', onDecision: null });
+    const [mergeModal, setMergeModal] = useState({ open: false, firstId: '', secondId: '' });
+    const [mergedOrderModal, setMergedOrderModal] = useState({ open: false, order: null });
+    
     // Analytics, Transactions & Search States
     const [analyticsFilter, setAnalyticsFilter] = useState('Today'); 
     const [selectedRevenueCategory, setSelectedRevenueCategory] = useState(null);
@@ -871,7 +891,13 @@ useEffect(() => {
                 return;
             }
 
-            // 5. CLOSE PAYMENT MODAL
+            // 5. CLOSE UPI QR PAYMENT MODAL
+            if (paymentQrModal.open) {
+                closePaymentQrModal();
+                return;
+            }
+
+            // 6. CLOSE PAYMENT MODAL
             if (adminPaymentModal.open) {
                 setAdminPaymentModal({
                     open: false,
@@ -879,6 +905,24 @@ useEffect(() => {
                     total: null
                 });
                 setIsSplitMode(false);
+                return;
+            }
+
+            // CLOSE RECIPE MODAL
+            if (recipeModal.open) {
+                setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] });
+                return;
+            }
+
+            // CLOSE MERGED ORDER / UNMERGE MODAL
+            if (mergedOrderModal.open) {
+                setMergedOrderModal({ open: false, order: null });
+                return;
+            }
+
+            // CLOSE MERGE MODAL
+            if (mergeModal.open) {
+                setMergeModal({ open: false, firstId: '', secondId: '' });
                 return;
             }
 
@@ -1005,6 +1049,9 @@ useEffect(() => {
     editHistoryModal,
     orderActivityModal,
     adminPaymentModal,
+    paymentQrModal,
+    recipeModal,
+    mergeModal,
     itemModal,
     catModal,
     momentModal,
@@ -1100,7 +1147,16 @@ useEffect(() => {
     const fetchOrders = async () => {
         const { data: ord } = await supabase.from('orders').select('*').order('id', { ascending: false });
         if (ord) {
-            const formatted = ord.map(o => ({ ...o.order_details, id: o.id, status: o.status, tableNo: o.table_no, total: o.total }));
+            const formatted = ord.map(o => ({
+                ...o.order_details,
+                order_details: o.order_details || {},
+                id: o.id,
+                status: o.status,
+                tableNo: o.table_no,
+                total: o.total,
+                merged_into_id: o.merged_into_id ?? null,
+                merged_order_label: o.merged_order_label ?? null
+            }));
             setOrders(formatted);
             const hasPending = formatted.some(o => o.status === 'Received');
             if (hasPending) playAlert(); else stopAlert();
@@ -1120,6 +1176,25 @@ useEffect(() => {
     const fetchMenuItems = async () => {
         const { data } = await supabase.from('menu_items').select('*').order('id', { ascending: true });
         if (data) setMenuItems(data);
+    };
+
+    const fetchMenuRecipes = async () => {
+        const { data, error } = await supabase
+            .from('menu_item_recipes')
+            .select('id, menu_item_id, inventory_item_id, quantity, unit')
+            .order('id', { ascending: true });
+
+        if (error) {
+            console.error('Recipe load error:', error);
+            return;
+        }
+
+        const grouped = {};
+        (data || []).forEach(row => {
+            if (!grouped[row.menu_item_id]) grouped[row.menu_item_id] = [];
+            grouped[row.menu_item_id].push(row);
+        });
+        setMenuRecipes(grouped);
     };
 
     const fetchMoments = async () => {
@@ -1163,6 +1238,7 @@ useEffect(() => {
             fetchUsers(),
             fetchCategories(),
             fetchMenuItems(),
+            fetchMenuRecipes(),
             fetchMoments(),
             fetchInventory(),
             fetchExpenses(),
@@ -1355,6 +1431,7 @@ useEffect(() => {
     }, []);
 
     useEffect(() => { if (currentOperator.role === 'admin' && activeTab === 'settings') fetchStaffAccounts(); }, [activeTab, currentOperator.role]);
+    useEffect(() => { fetchValoUpiId(); }, []);
 
   const handleSaveCategory = async (e) => {
         e.preventDefault();
@@ -1388,6 +1465,149 @@ useEffect(() => {
         if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeDelete });
         else executeDelete();
     };
+
+
+    // ============================================================
+    // MENU RECIPE MANAGEMENT
+    // Each menu item can consume exact inventory quantities.
+    // Kg <-> Gram is converted by the database RPC.
+    // ============================================================
+    const openRecipeEditor = async (menuItem) => {
+        const rows = menuRecipes[menuItem.id] || [];
+        setRecipeModal({
+            open: true,
+            menuItem,
+            rows: rows.map(r => {
+                const inv = inventoryItems.find(i => Number(i.id) === Number(r.inventory_item_id));
+                return { ...r, recipeSearch: inv?.name || '' };
+            })
+        });
+        setRecipeSearch({});
+    };
+
+    const addRecipeRow = () => {
+        setRecipeModal(prev => ({
+            ...prev,
+            rows: [
+                ...prev.rows,
+                {
+                    id: `new_${Date.now()}_${Math.random()}`,
+                    menu_item_id: prev.menuItem?.id,
+                    inventory_item_id: '',
+                    quantity: 1,
+                    unit: 'Unit',
+                    recipeSearch: ''
+                }
+            ]
+        }));
+    };
+
+    const updateRecipeRow = (index, field, value) => {
+        setRecipeModal(prev => ({
+            ...prev,
+            rows: prev.rows.map((row, i) => i === index ? { ...row, [field]: field === 'inventory_item_id' ? Number(value) : value } : row)
+        }));
+    };
+
+    const removeRecipeRow = (index) => {
+        setRecipeModal(prev => ({
+            ...prev,
+            rows: prev.rows.filter((_, i) => i !== index)
+        }));
+    };
+
+    const saveRecipeEditor = async () => {
+        const menuItemId = recipeModal.menuItem?.id;
+        if (!menuItemId) return;
+
+        const cleanRows = recipeModal.rows.filter(row => row.inventory_item_id && Number(row.quantity) > 0);
+        const seen = new Set();
+
+        for (const row of cleanRows) {
+            const invId = Number(row.inventory_item_id);
+            if (seen.has(invId)) {
+                alert('Each inventory item can appear only once in a recipe.');
+                return;
+            }
+            seen.add(invId);
+
+            const inv = inventoryItems.find(i => Number(i.id) === invId);
+            const unit = row.unit || inv?.unit || 'Unit';
+            if (!inv) {
+                alert('One recipe inventory item could not be found.');
+                return;
+            }
+            if (!['Packet', 'Kg', 'Gram', 'Unit'].includes(unit)) {
+                alert('Invalid recipe unit.');
+                return;
+            }
+
+            // Packet/Unit must match exactly; Kg and Gram may convert.
+            if (unit !== inv.unit && !((unit === 'Kg' && inv.unit === 'Gram') || (unit === 'Gram' && inv.unit === 'Kg'))) {
+                alert(`${inv.name}: inventory is ${inv.unit}, but recipe uses ${unit}. Use the same unit, or Kg/Gram.`);
+                return;
+            }
+        }
+
+        const { error: deleteError } = await supabase
+            .from('menu_item_recipes')
+            .delete()
+            .eq('menu_item_id', menuItemId);
+
+        if (deleteError) {
+            alert(deleteError.message || 'Could not clear old recipe.');
+            return;
+        }
+
+        if (cleanRows.length) {
+            const payload = cleanRows.map(row => ({
+                menu_item_id: menuItemId,
+                inventory_item_id: Number(row.inventory_item_id),
+                quantity: Number(row.quantity),
+                unit: row.unit
+            }));
+
+            const { error: insertError } = await supabase
+                .from('menu_item_recipes')
+                .insert(payload);
+
+            if (insertError) {
+                alert(insertError.message || 'Could not save recipe.');
+                await fetchMenuRecipes();
+                return;
+            }
+        }
+
+        await fetchMenuRecipes();
+        setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] });
+        alert(`Recipe saved for ${recipeModal.menuItem.name}.`);
+    };
+
+    const adjustMenuRecipeStock = async (menuItemId, quantityDelta) => {
+        if (!menuItemId || !quantityDelta) return true;
+
+        const recipe = menuRecipes[menuItemId] || [];
+        if (!recipe.length) return true;
+
+        const { error } = await supabase.rpc('adjust_menu_recipe_stock', {
+            p_menu_item_id: Number(menuItemId),
+            p_quantity_delta: Number(quantityDelta)
+        });
+
+        if (error) {
+            console.error('Recipe inventory adjustment error:', error);
+            alert(error.message || 'Unable to update recipe inventory stock.');
+            return false;
+        }
+
+        await fetchInventory();
+        return true;
+    };
+
+    const getOrderMenuRecipeAdjustments = (items) =>
+        Object.entries(items || {})
+            .map(([menuId, qty]) => ({ menuId: Number(menuId), qty: Number(qty || 0) }))
+            .filter(x => x.menuId && x.qty);
 
     const handleSaveItem = async (e) => {
         e.preventDefault();
@@ -1489,6 +1709,7 @@ useEffect(() => {
     const newBarcode = String(form.get('barcode') || '').trim();
     const newStock = Number(form.get('stock'));
     const newPrice = Number(form.get('price'));
+    const newUnit = String(form.get('unit') || 'Unit').trim();
 
     if (!newName) {
         alert('Item name is required.');
@@ -1505,12 +1726,18 @@ useEffect(() => {
         return;
     }
 
+    if (!['Packet', 'Kg', 'Gram', 'Unit'].includes(newUnit)) {
+        alert('Please select a valid inventory unit.');
+        return;
+    }
+
     const payload = {
         name: newName,
         category: newCategory,
         barcode: newBarcode,
         stock: newStock,
-        price: newPrice
+        price: newPrice,
+        unit: newUnit
     };
 
     // ============================================================
@@ -1871,6 +2098,8 @@ const handleSaveMissingItem = async (e) => {
     };
 
     const updateOrder = async (id, updates) => {
+        const { skipRecipeRefund = false, ...cleanUpdates } = updates || {};
+        updates = cleanUpdates;
         const { data: current, error: fetchError } = await supabase.from('orders').select('order_details, total, status').eq('id', id).single();
         if (fetchError) return { error: fetchError };
         if (!current) return { error: new Error('Order not found.') };
@@ -1882,6 +2111,7 @@ const handleSaveMissingItem = async (e) => {
         const newItems = newDetails.items || {};
         const newCustomItems = Array.isArray(newDetails.customItems) ? newDetails.customItems : [];
         const added = [], removed = [];
+        const recipeAdjustments = [];
 
         Object.entries(newItems).forEach(([menuId, qty]) => {
             const diff = Number(qty || 0) - Number(oldItems[menuId] || 0);
@@ -1889,7 +2119,26 @@ const handleSaveMissingItem = async (e) => {
             const mItem = menuItems.find(item => item.id === parseInt(menuId));
             const name = mItem?.name || 'Menu Item';
             if (diff > 0) added.push(`${name} ×${diff}`); else removed.push(`${name} ×${Math.abs(diff)}`);
+            // When an item is physically made, removing it should not put its
+            // recipe ingredients back into inventory.
+            if (!(skipRecipeRefund && diff < 0)) {
+                recipeAdjustments.push({ menuId: Number(menuId), delta: diff });
+            }
         });
+
+        // Apply recipe stock changes before saving the order. If the database
+        // update fails, reverse every successful recipe adjustment.
+        const appliedRecipeAdjustments = [];
+        for (const adjustment of recipeAdjustments) {
+            const ok = await adjustMenuRecipeStock(adjustment.menuId, adjustment.delta);
+            if (!ok) {
+                for (const applied of appliedRecipeAdjustments.reverse()) {
+                    await adjustMenuRecipeStock(applied.menuId, -applied.delta);
+                }
+                return { error: new Error('Recipe inventory could not be updated.') };
+            }
+            appliedRecipeAdjustments.push(adjustment);
+        }
 
         const oldById = new Map(oldCustomItems.map(item => [String(item.id), item]));
         const newById = new Map(newCustomItems.map(item => [String(item.id), item]));
@@ -1901,6 +2150,32 @@ const handleSaveMissingItem = async (e) => {
         oldCustomItems.forEach(item => {
             if (!newById.has(String(item.id)) && Number(item.qty || 0) > 0) removed.push(`${item.name || 'Item'} ×${Number(item.qty || 0)}`);
         });
+
+        // Cancellation returns all menu-recipe ingredients. Re-opening a
+        // previously cancelled order consumes them again.
+        const oldStatus = String(current.status || '');
+        const nextStatus = updates.status !== undefined ? String(updates.status) : oldStatus;
+        if (nextStatus === 'Cancelled' && oldStatus !== 'Cancelled') {
+            for (const item of getOrderMenuRecipeAdjustments(newItems)) {
+                const ok = await adjustMenuRecipeStock(item.menuId, -item.qty);
+                if (!ok) {
+                    for (const applied of appliedRecipeAdjustments.reverse()) {
+                        await adjustMenuRecipeStock(applied.menuId, -applied.delta);
+                    }
+                    return { error: new Error('Recipe inventory could not be refunded.') };
+                }
+            }
+        } else if (oldStatus === 'Cancelled' && nextStatus !== 'Cancelled') {
+            for (const item of getOrderMenuRecipeAdjustments(newItems)) {
+                const ok = await adjustMenuRecipeStock(item.menuId, item.qty);
+                if (!ok) {
+                    for (const applied of appliedRecipeAdjustments.reverse()) {
+                        await adjustMenuRecipeStock(applied.menuId, -applied.delta);
+                    }
+                    return { error: new Error('Recipe inventory is insufficient to reopen this order.') };
+                }
+            }
+        }
 
         const dbPayload = {
             status: updates.status || current.status,
@@ -2044,27 +2319,204 @@ const handleSaveMissingItem = async (e) => {
         setHistoryItemForm({ name: '', price: '', qty: 1, menuId: null, invId: null, isInv: false });
     };
 
-  const handleSaveHistoryEdit = async (e) => {
-        e.preventDefault();
+    const handleHistoryDeleteItem = ({ menuId = null, customId = null }) => {
         const order = editHistoryModal.order;
-        const form = new FormData(e.target);
-        
-        const newTotal = Number(form.get('total'));
-        const newMethod = form.get('paymentMethod');
-        const newStatus = form.get('status');
-        
-        let splitAmounts = null;
-        if (newMethod === 'Split') {
-            const c = Number(form.get('splitCash'));
-            const o = Number(form.get('splitOnline'));
-            if (c + o !== newTotal) {
-                alert(`Split amounts (₹${c + o}) must exactly equal the Total Amount (₹${newTotal})`);
+        if (!order) return;
+        let itemName = 'this item';
+        if (menuId !== null) {
+            itemName = menuItems.find(i => Number(i.id) === Number(menuId))?.name || 'this item';
+        } else if (customId !== null) {
+            itemName = (order.customItems || []).find(c => String(c.id) === String(customId))?.name || 'this item';
+        }
+        setRemoveItemConfirm({
+            open: true,
+            itemName,
+            onDecision: (made) => executeHistoryDeleteItem({ menuId, customId, made })
+        });
+    };
+
+    const calculateOrderTotalFromItems = (itemsObj = {}, customItemsArr = []) => {
+        let total = 0;
+        Object.entries(itemsObj || {}).forEach(([id, qty]) => {
+            const item = menuItems.find(i => Number(i.id) === Number(id));
+            const price = item ? (parseInt(String(item.price).replace(/[^0-9]/g, '')) || 0) : 0;
+            total += price * Number(qty || 0);
+        });
+        (customItemsArr || []).forEach(item => {
+            total += Number(item.price || 0) * Number(item.qty || 0);
+        });
+        return total;
+    };
+
+    const executeHistoryDeleteItem = async ({ menuId = null, customId = null, made = false }) => {
+        const order = editHistoryModal.order;
+        if (!order) return;
+
+        const updatedItems = { ...(order.items || {}) };
+        const updatedCustomItems = [...(order.customItems || [])];
+        let removedInventoryRefund = null;
+
+        if (menuId !== null) {
+            const key = String(menuId);
+            if (!updatedItems[key]) return;
+            delete updatedItems[key];
+
+            const result = await updateOrder(order.id, {
+                items: updatedItems,
+                customItems: updatedCustomItems,
+                total: calculateOrderTotalFromItems(updatedItems, updatedCustomItems),
+                skipRecipeRefund: made
+            });
+            if (result?.error) return;
+        } else if (customId !== null) {
+            const index = updatedCustomItems.findIndex(c => String(c.id) === String(customId));
+            if (index < 0) return;
+            const item = updatedCustomItems[index];
+
+            if (!made && item.isInv && item.invId) {
+                const qty = Number(item.qty || 0);
+                if (qty > 0) {
+                    const refunded = await adjustInventoryStock(item.invId, qty);
+                    if (refunded === null) return;
+                    removedInventoryRefund = { invId: item.invId, qty };
+                }
+            }
+
+            updatedCustomItems.splice(index, 1);
+            const result = await updateOrder(order.id, {
+                items: updatedItems,
+                customItems: updatedCustomItems,
+                total: calculateOrderTotalFromItems(updatedItems, updatedCustomItems)
+            });
+            if (result?.error) {
+                if (removedInventoryRefund) {
+                    await adjustInventoryStock(removedInventoryRefund.invId, -removedInventoryRefund.qty);
+                }
                 return;
             }
-            splitAmounts = { cash: c, online: o };
         }
 
-        // --- FIX: INSTANT LIVE REFUND ON CANCELLATION ---
+        const latest = {
+            ...editHistoryModal.order,
+            items: updatedItems,
+            customItems: updatedCustomItems,
+            total: calculateOrderTotalFromItems(updatedItems, updatedCustomItems)
+        };
+        setEditHistoryModal(prev => ({ ...prev, order: latest }));
+        await fetchOrders();
+    };
+
+    // ============================================================
+    // UPI QR PAYMENT HELPERS
+    // ============================================================
+    const fetchValoUpiId = async () => {
+        try {
+            const { data, error } = await supabase
+                .from('app_settings')
+                .select('upi_id')
+                .eq('id', 1)
+                .single();
+
+            if (error) {
+                console.error('UPI ID fetch error:', error);
+                return '';
+            }
+
+            const value = String(data?.upi_id || '').trim();
+            setValoUpiId(value);
+            return value;
+        } catch (err) {
+            console.error('UPI ID fetch exception:', err);
+            return '';
+        }
+    };
+
+    const getValoUpiId = () => String(valoUpiId || '').trim();
+
+    const buildUpiPaymentUri = (amount, orderId = null) => {
+        const upiId = getValoUpiId();
+        if (!upiId) return null;
+
+        const safeAmount = Number(amount || 0).toFixed(2);
+        const note = orderId ? `VALO Order #${orderId}` : 'VALO Payment';
+
+        return `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent('VALO')}&am=${encodeURIComponent(safeAmount)}&cu=INR&tn=${encodeURIComponent(note)}`;
+    };
+
+    const buildUpiQrImageUrl = (upiUri) => {
+        if (!upiUri) return null;
+        return `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=12&data=${encodeURIComponent(upiUri)}`;
+    };
+
+    const closePaymentQrModal = () => {
+        setPaymentQrModal({
+            open: false,
+            amount: 0,
+            orderId: null,
+            splitAmounts: null,
+            source: null,
+            historyPayload: null
+        });
+    };
+
+    const openPaymentQr = ({ amount, orderId, splitAmounts = null, source, historyPayload = null }) => {
+        const numericAmount = Number(amount || 0);
+        if (numericAmount <= 0) {
+            alert('Online payment amount must be greater than ₹0.');
+            return false;
+        }
+
+        const uri = buildUpiPaymentUri(numericAmount, orderId);
+        if (!uri) {
+            alert('UPI ID is not configured. Please open Settings → UPI Payment Settings and save the VALO UPI ID first.');
+            return false;
+        }
+
+        setPaymentQrModal({
+            open: true,
+            amount: numericAmount,
+            orderId,
+            splitAmounts,
+            source,
+            historyPayload: { ...(historyPayload || {}), upiUri: uri }
+        });
+        return true;
+    };
+
+    const confirmQrPayment = async () => {
+        const qr = paymentQrModal;
+        if (!qr.open) return;
+
+        if (qr.source === 'history') {
+            const payload = qr.historyPayload || {};
+            await saveHistoryEditPayload(payload);
+        } else if (qr.orderId) {
+            const updates = {
+                paymentStatus: 'Paid',
+                paymentMethod: qr.splitAmounts ? 'Split' : 'Online'
+            };
+            if (qr.splitAmounts) updates.splitAmounts = qr.splitAmounts;
+
+            const result = await updateOrder(qr.orderId, updates);
+            if (result?.error) {
+                alert(result.error.message || 'Unable to update payment.');
+                return;
+            }
+        }
+
+        closePaymentQrModal();
+        setAdminPaymentModal({ open: false, orderId: null, total: null });
+        setIsSplitMode(false);
+        setSplitCash('');
+        setSplitOnline('');
+        await fetchOrders();
+    };
+
+    const saveHistoryEditPayload = async (payload) => {
+        const { order, newTotal, newMethod, newStatus, newPaymentStatus, splitAmounts } = payload;
+        if (!order) return;
+
+        // --- INVENTORY REFUND ON CANCELLATION ---
         if (newStatus === 'Cancelled' && order.status !== 'Cancelled') {
             const cItems = order.customItems || [];
             for (const c of cItems) {
@@ -2076,36 +2528,172 @@ const handleSaveMissingItem = async (e) => {
                     }
                 }
             }
-            alert("Order cancelled. Inventory stock has been accurately refunded.");
+            alert('Order cancelled. Inventory stock has been accurately refunded.');
         }
 
-        await updateOrder(order.id, {
+        const result = await updateOrder(order.id, {
             total: newTotal,
             paymentMethod: newMethod,
             status: newStatus,
             splitAmounts: splitAmounts,
-            paymentStatus: newStatus === 'Cancelled' ? 'Pending' : 'Paid'
+            paymentStatus: newStatus === 'Cancelled' ? 'Pending' : newPaymentStatus
         });
 
-        alert("Order Successfully Updated!");
+        if (result?.error) {
+            alert(result.error.message || 'Unable to update order.');
+            return;
+        }
+
+        alert('Order Successfully Updated!');
         setEditHistoryModal({ open: false, order: null, tempMethod: 'Cash' });
-        await Promise.all([fetchOrders(), fetchInventory()]); 
+        await Promise.all([fetchOrders(), fetchInventory()]);
+    };
+
+  const handleSaveHistoryEdit = async (e) => {
+        e.preventDefault();
+        const order = editHistoryModal.order;
+        const form = new FormData(e.target);
+
+        const newTotal = Number(form.get('total'));
+        const newMethod = form.get('paymentMethod');
+        const newStatus = form.get('status');
+        const newPaymentStatus = form.get('paymentStatus') || 'Pending';
+
+        let splitAmounts = null;
+        if (newMethod === 'Split') {
+            const c = Number(form.get('splitCash') || 0);
+            const o = Number(form.get('splitOnline') || 0);
+            if (c < 0 || o < 0 || c + o !== newTotal) {
+                alert(`Split amounts (₹${c + o}) must exactly equal the Total Amount (₹${newTotal})`);
+                return;
+            }
+            splitAmounts = { cash: c, online: o };
+        }
+
+        const payload = {
+            order,
+            newTotal,
+            newMethod,
+            newStatus,
+            newPaymentStatus,
+            splitAmounts
+        };
+
+        // Online payment: show an exact-amount UPI QR before marking paid.
+        if (newPaymentStatus === 'Paid' && newMethod === 'Online') {
+            openPaymentQr({
+                amount: newTotal,
+                orderId: order.id,
+                source: 'history',
+                historyPayload: payload
+            });
+            return;
+        }
+
+        // Split payment: cash is recorded directly and only the online
+        // portion is sent through the QR. If online is ₹0, save directly.
+        if (newPaymentStatus === 'Paid' && newMethod === 'Split' && Number(splitAmounts?.online || 0) > 0) {
+            openPaymentQr({
+                amount: Number(splitAmounts.online),
+                orderId: order.id,
+                splitAmounts,
+                source: 'history',
+                historyPayload: payload
+            });
+            return;
+        }
+
+        await saveHistoryEditPayload(payload);
     };
 
    const handleAdminMarkPaid = async (method, splitAmounts = null) => {
-    if (adminPaymentModal.orderId) {
-        const pStatus = method === 'Pending' ? 'Pending' : 'Paid';
-        const finalMethod = method === 'Pending' ? 'Cash' : method;
-        
-        const updates = { paymentStatus: pStatus, paymentMethod: finalMethod };
-        if (splitAmounts) {
-            updates.splitAmounts = splitAmounts;
-        }
-        await updateOrder(adminPaymentModal.orderId, updates);
-    }
-    setAdminPaymentModal({ open: false, orderId: null, total: null });
-    setIsSplitMode(false);
-};
+     if (!adminPaymentModal.orderId) return;
+
+     const orderId = adminPaymentModal.orderId;
+
+     if (method === 'Cash') {
+         const result = await updateOrder(orderId, {
+             paymentStatus: 'Paid',
+             paymentMethod: 'Cash',
+             splitAmounts: null
+         });
+         if (result?.error) {
+             alert(result.error.message || 'Unable to mark payment as paid.');
+             return;
+         }
+
+         setAdminPaymentModal({ open: false, orderId: null, total: null });
+         setIsSplitMode(false);
+         setSplitCash('');
+         setSplitOnline('');
+         await fetchOrders();
+         return;
+     }
+
+     if (method === 'Online') {
+         openPaymentQr({
+             amount: Number(adminPaymentModal.total || 0),
+             orderId,
+             source: 'markPaid'
+         });
+         return;
+     }
+
+     if (method === 'Split') {
+         const c = Number(splitAmounts?.cash || 0);
+         const o = Number(splitAmounts?.online || 0);
+
+         if (c < 0 || o < 0 || c + o !== Number(adminPaymentModal.total || 0)) {
+             alert(`The split amounts (₹${c + o}) must equal the exact Bill Total (₹${adminPaymentModal.total})`);
+             return;
+         }
+
+         if (o > 0) {
+             openPaymentQr({
+                 amount: o,
+                 orderId,
+                 splitAmounts: { cash: c, online: o },
+                 source: 'markPaid'
+             });
+             return;
+         }
+
+         const result = await updateOrder(orderId, {
+             paymentStatus: 'Paid',
+             paymentMethod: 'Split',
+             splitAmounts: { cash: c, online: o }
+         });
+         if (result?.error) {
+             alert(result.error.message || 'Unable to mark payment as paid.');
+             return;
+         }
+
+         setAdminPaymentModal({ open: false, orderId: null, total: null });
+         setIsSplitMode(false);
+         setSplitCash('');
+         setSplitOnline('');
+         await fetchOrders();
+         return;
+     }
+
+     if (method === 'Pending') {
+         const result = await updateOrder(orderId, {
+             paymentStatus: 'Pending',
+             paymentMethod: 'Cash',
+             splitAmounts: null
+         });
+         if (result?.error) {
+             alert(result.error.message || 'Unable to update payment.');
+             return;
+         }
+
+         setAdminPaymentModal({ open: false, orderId: null, total: null });
+         setIsSplitMode(false);
+         setSplitCash('');
+         setSplitOnline('');
+         await fetchOrders();
+     }
+   };
 
     const toggleItemReady = async (order, itemKey) => {
         const currentStatuses = order.itemStatuses || {};
@@ -2286,8 +2874,23 @@ const handleSaveMissingItem = async (e) => {
     };
 
     const removeLiveOrderItem = async (orderId, itemKey, isCustom) => {
-        if (!confirm('Are you sure you want to remove this item from the order?')) return;
+        const { data: dbOrder } = await supabase.from('orders').select('order_details').eq('id', orderId).single();
+        const details = dbOrder?.order_details || {};
+        let itemName = 'this item';
+        if (isCustom) {
+            itemName = (details.customItems || []).find(c => c.id === itemKey)?.name || 'this item';
+        } else {
+            const menuId = String(itemKey).replace('menu_', '');
+            itemName = menuItems.find(i => Number(i.id) === Number(menuId))?.name || 'this item';
+        }
+        setRemoveItemConfirm({
+            open: true,
+            itemName,
+            onDecision: (made) => executeRemoveLiveOrderItem(orderId, itemKey, isCustom, made)
+        });
+    };
 
+    const executeRemoveLiveOrderItem = async (orderId, itemKey, isCustom, made = false) => {
         return withOrderMutationLock(orderId, async () => {
             const { data: dbOrder, error: fetchError } = await supabase
                 .from('orders')
@@ -2320,7 +2923,7 @@ const handleSaveMissingItem = async (e) => {
 
                 removedItemName = cItem.name || 'Item';
 
-                if (cItem.isInv && cItem.invId) {
+                if (!made && cItem.isInv && cItem.invId) {
                     const refundQty = Number(cItem.qty) || 0;
                     if (refundQty > 0) {
                         const newStock = await adjustInventoryStock(
@@ -2361,7 +2964,8 @@ const handleSaveMissingItem = async (e) => {
                 customItems: updatedCustomItems,
                 items: updatedRegularItems,
                 itemStatuses: updatedStatuses,
-                total: newTotal
+                total: newTotal,
+                skipRecipeRefund: made
             });
 
             if (result?.error) {
@@ -2562,6 +3166,25 @@ const handleCreateBill = async () => {
             deductedInventory.push({ invId: item.invId, qty });
         }
 
+        // Menu recipes are consumed in exact recipe quantities for every
+        // menu item on this bill.
+        const deductedRecipes = [];
+        for (const [menuId, qty] of Object.entries(regularItems)) {
+            const amount = Number(qty || 0);
+            if (!amount) continue;
+            const ok = await adjustMenuRecipeStock(Number(menuId), amount);
+            if (!ok) {
+                for (const recipe of deductedRecipes.reverse()) {
+                    await adjustMenuRecipeStock(recipe.menuId, -recipe.qty);
+                }
+                for (const deducted of deductedInventory) {
+                    await adjustInventoryStock(deducted.invId, deducted.qty);
+                }
+                return;
+            }
+            deductedRecipes.push({ menuId: Number(menuId), qty: amount });
+        }
+
         let existingOrder = orders.find(o => {
             const isActive = ['Received', 'Preparing', 'Ready'].includes(o.status);
             if (!isActive) return false;
@@ -2592,6 +3215,9 @@ const handleCreateBill = async () => {
                 }).eq('id', dbOrder.id);
 
                 if (error) {
+                    for (const recipe of deductedRecipes.reverse()) {
+                        await adjustMenuRecipeStock(recipe.menuId, -recipe.qty);
+                    }
                     for (const deducted of deductedInventory) {
                         await adjustInventoryStock(deducted.invId, deducted.qty);
                     }
@@ -2648,6 +3274,9 @@ const handleCreateBill = async () => {
                 .select();
 
             if (error) {
+                for (const recipe of deductedRecipes.reverse()) {
+                    await adjustMenuRecipeStock(recipe.menuId, -recipe.qty);
+                }
                 for (const deducted of deductedInventory) {
                     await adjustInventoryStock(deducted.invId, deducted.qty);
                 }
@@ -3279,7 +3908,7 @@ const handleCreateBill = async () => {
     const financials = calculateDailyFinancials();
 
     const getFilteredTransactions = () => {
-        let filtered = orders.filter(o => o.paymentStatus === 'Paid');
+        let filtered = orders.filter(o => o.paymentStatus === 'Paid' && o.status !== 'Merged');
         
         if (analyticsFilter === 'Custom') {
             const parts = analyticsCustomDate.split('-');
@@ -3353,9 +3982,758 @@ const handleCreateBill = async () => {
     const totalTxnPages = Math.max(1, Math.ceil(filteredTxns.length / txnsPerPage));
     const currentTxns = filteredTxns.slice((transactionPage - 1) * txnsPerPage, transactionPage * txnsPerPage);
 
+
+    // ============================================================
+    // MERGE TWO ORDERS BY ORDER NUMBER
+    // The first order remains as the master order. The second is marked
+    // Merged so it does not double-count in History/Analytics.
+    // Inventory is NOT changed during a merge because both original
+    // orders already consumed their recipe stock when created.
+    // ============================================================
+    const cleanOrderNumberLabel = (value, fallback = '') => {
+        const text = String(value ?? fallback ?? '').trim();
+        return text.replace(/^#+/, '') || String(fallback || '').replace(/^#+/, '');
+    };
+
+    const makeMergeSourceSnapshot = (order) => ({
+        id: Number(order.id),
+        displayId: cleanOrderNumberLabel(order.displayId, order.id),
+        status: order.status || 'Picked Up',
+        total: Number(order.total || 0),
+        items: { ...(order.items || {}) },
+        customItems: Array.isArray(order.customItems) ? order.customItems : [],
+        paymentStatus: order.paymentStatus || 'Pending',
+        paymentMethod: order.paymentMethod || 'Cash',
+        splitAmounts: order.splitAmounts || null,
+        tableNo: order.tableNo,
+        customer: order.customer || { name: 'Walk-in', phone: '' },
+        date: order.date,
+        time: order.time,
+        timestamp: order.timestamp,
+        item_names: order.item_names || generateItemNamesString(order.items || {}, order.customItems || []),
+        order_details: order.order_details || {},
+        recoverable: true
+    });
+
+    const calculateMergedPayment = (sources) => {
+        const allPaid = sources.every(src => src.paymentStatus === 'Paid');
+        let cash = 0;
+        let online = 0;
+
+        sources.forEach(src => {
+            const method = src.paymentMethod || 'Cash';
+            if (method === 'Split' && src.splitAmounts) {
+                cash += Number(src.splitAmounts.cash || 0);
+                online += Number(src.splitAmounts.online || 0);
+            } else if (method === 'Online') {
+                online += Number(src.total || 0);
+            } else {
+                cash += Number(src.total || 0);
+            }
+        });
+
+        if (!allPaid) {
+            return {
+                paymentStatus: 'Pending',
+                paymentMethod: cash > 0 && online > 0 ? 'Split' : (online > 0 ? 'Online' : 'Cash'),
+                splitAmounts: cash > 0 && online > 0 ? { cash, online } : null
+            };
+        }
+
+        if (cash > 0 && online > 0) {
+            return { paymentStatus: 'Paid', paymentMethod: 'Split', splitAmounts: { cash, online } };
+        }
+        if (online > 0) {
+            return { paymentStatus: 'Paid', paymentMethod: 'Online', splitAmounts: null };
+        }
+        return { paymentStatus: 'Paid', paymentMethod: 'Cash', splitAmounts: null };
+    };
+
+    const mergeOrdersByNumber = async (firstIdInput, secondIdInput) => {
+        const firstId = Number(String(firstIdInput || '').trim());
+        const secondId = Number(String(secondIdInput || '').trim());
+
+        if (!Number.isInteger(firstId) || !Number.isInteger(secondId) || firstId <= 0 || secondId <= 0) {
+            alert('Enter two valid order numbers.');
+            return;
+        }
+        if (firstId === secondId) {
+            alert('Please select two different orders.');
+            return;
+        }
+
+        const first = orders.find(o => Number(o.id) === firstId);
+        const second = orders.find(o => Number(o.id) === secondId);
+
+        if (!first || !second) {
+            alert('One or both order numbers were not found.');
+            return;
+        }
+
+        if (second.status === 'Merged') {
+            alert('The second order is already part of another merged order. Open that merged order and use its Merge button instead.');
+            return;
+        }
+
+        const allowedStatuses = ['Received', 'Preparing', 'Ready', 'Picked Up'];
+        if (!allowedStatuses.includes(second.status)) {
+            alert('Only pending/live or completed (Paid/Picked Up) orders can be merged.');
+            return;
+        }
+
+        let existingSources = [];
+        if (isMergedOrder(first)) {
+            existingSources = getMergedSources(first);
+            if (existingSources.length < 2 || existingSources.some(src => src.recoverable === false)) {
+                alert('This merged order is missing an original source snapshot. Run the supplied merge-recovery SQL once, then try again.');
+                return;
+            }
+            if (existingSources.some(src => Number(src.id) === secondId)) {
+                alert(`Order #${secondId} is already included in this merged order.`);
+                return;
+            }
+        } else {
+            if (first.status === 'Merged') {
+                alert('Open the existing merged order and use its Merge button.');
+                return;
+            }
+            existingSources = [makeMergeSourceSnapshot(first)];
+        }
+
+        const allSources = [...existingSources, makeMergeSourceSnapshot(second)];
+        const allItems = {};
+        allSources.forEach(src => {
+            Object.entries(src.items || {}).forEach(([menuId, qty]) => {
+                allItems[menuId] = Number(allItems[menuId] || 0) + Number(qty || 0);
+            });
+        });
+        const allCustom = allSources.flatMap(src => Array.isArray(src.customItems) ? src.customItems : []);
+        const total = allSources.reduce((sum, src) => sum + Number(src.total || 0), 0);
+        const payment = calculateMergedPayment(allSources);
+        const mergedLabel = allSources.map(src => cleanOrderNumberLabel(src.displayId, src.id)).join(' + ');
+
+        const firstStatus = first.status || 'Picked Up';
+        const allPickedUp = allSources.every(src => src.status === 'Picked Up');
+        const mergedStatus = allPickedUp ? 'Picked Up' : firstStatus;
+
+        const mergedDetails = buildOperatorMeta({
+            ...first,
+            items: allItems,
+            customItems: allCustom,
+            date: first.date || getFormattedDate(),
+            time: first.time || getFormattedTime(),
+            timestamp: Math.min(...allSources.map(src => Number(src.timestamp || Date.now()))),
+            customer: first.customer || allSources[0]?.customer || { name: 'Walk-in', phone: '' },
+            paymentMethod: payment.paymentMethod,
+            paymentStatus: payment.paymentStatus,
+            splitAmounts: payment.splitAmounts,
+            displayId: mergedLabel,
+            mergedOrderIds: allSources.map(src => src.id),
+            mergedFrom: mergedLabel,
+            mergedSources: allSources
+        });
+
+        delete mergedDetails.id;
+        delete mergedDetails.status;
+        delete mergedDetails.total;
+        delete mergedDetails.tableNo;
+
+        const { error: masterError } = await supabase.from('orders').update({
+            total,
+            status: mergedStatus,
+            order_details: mergedDetails,
+            item_names: generateItemNamesString(allItems, allCustom),
+            merged_order_label: mergedLabel,
+            merged_into_id: null
+        }).eq('id', first.id);
+
+        if (masterError) {
+            alert(masterError.message || 'Could not create merged order.');
+            return;
+        }
+
+        const secondSnapshot = makeMergeSourceSnapshot(second);
+        const { error: secondError } = await supabase.from('orders').update({
+            status: 'Merged',
+            order_details: buildOperatorMeta({
+                ...(second.order_details || {}),
+                mergedInto: first.id,
+                mergedLabel,
+                mergedAt: new Date().toISOString(),
+                originalMergeSource: secondSnapshot,
+                originalPaymentStatus: secondSnapshot.paymentStatus,
+                originalPaymentMethod: secondSnapshot.paymentMethod,
+                originalSplitAmounts: secondSnapshot.splitAmounts
+            }),
+            item_names: `Merged into Order #${first.id} (${mergedLabel})`,
+            merged_into_id: first.id,
+            merged_order_label: mergedLabel
+        }).eq('id', second.id);
+
+        if (secondError) {
+            await supabase.from('orders').update({
+                total: first.total,
+                status: first.status,
+                order_details: first.order_details || { ...(first || {}) },
+                item_names: first.item_names || generateItemNamesString(first.items, first.customItems),
+                merged_order_label: isMergedOrder(first) ? (first.merged_order_label || first.displayId || null) : null,
+                merged_into_id: null
+            }).eq('id', first.id);
+            alert(secondError.message || 'Could not complete order merge.');
+            return;
+        }
+
+        await logOrderActivity(first.id, 'ORDER_MERGED', `Order #${second.id} was added to ${mergedLabel}. Combined total ₹${total}.`);
+        await logOrderActivity(second.id, 'ORDER_MERGED', `Order #${second.id} merged into Order #${first.id} as ${mergedLabel}.`);
+
+        await notifyOrderEvent(
+            '🔗 Orders Merged',
+            `${mergedLabel} merged into one order. Total ₹${total}.`,
+            { orderId: first.id, mergedOrderIds: allSources.map(src => src.id), action: 'ORDER_MERGED' },
+            'success'
+        );
+
+        setMergeModal({ open: false, firstId: '', secondId: '' });
+        setMergedOrderModal({ open: false, order: null });
+        setViewOrderDetails(null);
+        setEditHistoryModal({ open: false, order: null, tempMethod: 'Cash' });
+        await fetchOrders();
+        alert(`Orders merged successfully as ${mergedLabel}. Total: ₹${total}`);
+    };
+
+    const getMergedSources = (order) => {
+        const details = order?.order_details || {};
+
+        let ids = Array.isArray(order?.mergedOrderIds)
+            ? order.mergedOrderIds
+            : (Array.isArray(details.mergedOrderIds) ? details.mergedOrderIds : []);
+
+        if (ids.length <= 1) {
+            const label = order?.merged_order_label || order?.displayId || details.mergedFrom || details.mergedLabel || '';
+            const parsed = String(label)
+                .split('+')
+                .map(part => Number(String(part).replace(/[^0-9]/g, '')))
+                .filter(id => Number.isInteger(id) && id > 0);
+            if (parsed.length > 1) ids = [...new Set(parsed)];
+        }
+
+        // Prefer the persisted snapshots when available. This is the safest path
+        // because it restores the exact original item/payment state.
+        const persistedSources = Array.isArray(details.mergedSources) && details.mergedSources.length > 1
+            ? details.mergedSources
+            : (Array.isArray(order?.mergedSources) && order.mergedSources.length > 1 ? order.mergedSources : null);
+
+        const persistedById = new Map();
+        if (persistedSources) {
+            persistedSources.forEach(src => {
+                const id = Number(src?.id);
+                if (Number.isInteger(id) && id > 0) {
+                    persistedById.set(id, {
+                        ...src,
+                        id,
+                        displayId: cleanOrderNumberLabel(src.displayId, id)
+                    });
+                }
+            });
+            if (ids.length <= 1 && persistedById.size > 1) ids = [...persistedById.keys()];
+        }
+
+        if (ids.length <= 1) return [];
+
+        const rebuilt = ids.map(rawId => {
+            const id = Number(rawId);
+            const found = orders.find(o => Number(o.id) === id);
+            const persisted = persistedById.get(id);
+
+            // A real originalMergeSource on the current database row always wins
+            // over an older embedded mergedSources array. This is what makes the
+            // SQL recovery repair authoritative after the app reloads.
+            const liveSaved = found?.order_details?.originalMergeSource;
+            if (liveSaved && liveSaved.items && liveSaved.total !== undefined) {
+                return {
+                    ...liveSaved,
+                    id,
+                    displayId: cleanOrderNumberLabel(liveSaved.displayId, id),
+                    recoverable: true
+                };
+            }
+
+            // Some older repaired rows have the original payment fields but
+            // their snapshot is not nested under originalMergeSource. If the
+            // original item data is still present in order_details, use it.
+            const inlineOriginalItems = found?.order_details?.items;
+            const inlineOriginalTotal = found?.order_details?.originalTotal ?? found?.total;
+            if (found && inlineOriginalItems && typeof inlineOriginalItems === 'object' && inlineOriginalTotal !== undefined && found.status === 'Merged') {
+                return {
+                    id: found.id,
+                    displayId: cleanOrderNumberLabel(found.displayId, found.id),
+                    status: found.order_details?.originalStatus || found.status || 'Picked Up',
+                    total: Number(inlineOriginalTotal || 0),
+                    items: { ...inlineOriginalItems },
+                    customItems: Array.isArray(found.order_details?.customItems) ? found.order_details.customItems : [],
+                    paymentStatus: found.order_details?.originalPaymentStatus || found.order_details?.paymentStatus || 'Pending',
+                    paymentMethod: found.order_details?.originalPaymentMethod || found.order_details?.paymentMethod || 'Cash',
+                    splitAmounts: found.order_details?.originalSplitAmounts || found.order_details?.splitAmounts || null,
+                    tableNo: found.order_details?.tableNo ?? found.tableNo,
+                    customer: found.order_details?.customer || found.customer || { name: 'Walk-in', phone: '' },
+                    date: found.order_details?.date || found.date,
+                    time: found.order_details?.time || found.time,
+                    timestamp: found.order_details?.timestamp || found.timestamp,
+                    item_names: found.item_names || generateItemNamesString(inlineOriginalItems, found.order_details?.customItems || []),
+                    order_details: found.order_details || {},
+                    recoverable: true,
+                    reconstructed: true
+                };
+            }
+
+            if (persisted && persisted.items && persisted.total !== undefined && persisted.recoverable !== false) {
+                return {
+                    ...persisted,
+                    id,
+                    displayId: cleanOrderNumberLabel(persisted.displayId, id),
+                    recoverable: true
+                };
+            }
+
+            if (!found) {
+                return {
+                    id,
+                    displayId: String(id),
+                    status: 'Merged',
+                    total: 0,
+                    items: {},
+                    customItems: [],
+                    paymentStatus: 'Pending',
+                    paymentMethod: 'Cash',
+                    splitAmounts: null,
+                    item_names: '',
+                    order_details: {},
+                    recoverable: false
+                };
+            }
+
+            const saved = found.order_details?.originalMergeSource;
+            if (saved && saved.items && saved.total !== undefined) {
+                return {
+                    ...saved,
+                    id: found.id,
+                    displayId: cleanOrderNumberLabel(saved.displayId, found.id),
+                    recoverable: true
+                };
+            }
+
+            const hasOriginalOrderData =
+                found.order_details &&
+                found.order_details.items &&
+                typeof found.order_details.items === 'object' &&
+                found.order_details.paymentStatus !== undefined &&
+                found.status !== 'Merged';
+
+            if (hasOriginalOrderData) {
+                return {
+                    id: found.id,
+                    displayId: cleanOrderNumberLabel(found.displayId, found.id),
+                    status: found.order_details.status || found.status || 'Picked Up',
+                    total: Number(found.total || found.order_details.total || 0),
+                    items: { ...(found.order_details.items || {}) },
+                    customItems: Array.isArray(found.order_details.customItems) ? found.order_details.customItems : [],
+                    paymentStatus: found.order_details.paymentStatus || 'Pending',
+                    paymentMethod: found.order_details.paymentMethod || 'Cash',
+                    splitAmounts: found.order_details.splitAmounts || null,
+                    tableNo: found.order_details.tableNo ?? found.tableNo,
+                    customer: found.order_details.customer || found.customer || { name: 'Walk-in', phone: '' },
+                    date: found.order_details.date || found.date,
+                    time: found.order_details.time || found.time,
+                    timestamp: found.order_details.timestamp || found.timestamp,
+                    item_names: found.item_names || generateItemNamesString(found.order_details.items || {}, found.order_details.customItems || []),
+                    order_details: found.order_details || {},
+                    recoverable: true
+                };
+            }
+
+            // Recovery path for older merges: if this is the master, reconstruct
+            // its original order by subtracting all recoverable child snapshots
+            // from the current combined master. The supplied SQL also persists
+            // this snapshot so the reconstruction only has to happen once.
+            if (Number(order?.id) === id) {
+                const combinedItems = { ...(found.items || {}) };
+                const combinedCustom = Array.isArray(found.customItems) ? [...found.customItems] : [];
+                let originalTotal = Number(found.total || 0);
+                const childIds = ids.filter(childId => Number(childId) !== id);
+                let canRebuild = true;
+
+                childIds.forEach(childId => {
+                    const child = orders.find(o => Number(o.id) === Number(childId));
+                    const childSnapshot = child?.order_details?.originalMergeSource;
+                    if (!childSnapshot || !childSnapshot.items || childSnapshot.total === undefined) {
+                        canRebuild = false;
+                        return;
+                    }
+                    Object.entries(childSnapshot.items || {}).forEach(([menuId, qty]) => {
+                        const nextQty = Number(combinedItems[menuId] || 0) - Number(qty || 0);
+                        if (nextQty > 0) combinedItems[menuId] = nextQty;
+                        else delete combinedItems[menuId];
+                    });
+
+                    // Remove one exact matching custom item for every child
+                    // custom item. This avoids duplicating custom lines after
+                    // an old merge is reconstructed.
+                    (Array.isArray(childSnapshot.customItems) ? childSnapshot.customItems : []).forEach(childCustom => {
+                        const idx = combinedCustom.findIndex(existing => {
+                            try { return JSON.stringify(existing) === JSON.stringify(childCustom); }
+                            catch { return false; }
+                        });
+                        if (idx >= 0) combinedCustom.splice(idx, 1);
+                    });
+
+                    originalTotal -= Number(childSnapshot.total || 0);
+                });
+
+                if (canRebuild && originalTotal >= 0) {
+                    return {
+                        id: found.id,
+                        displayId: cleanOrderNumberLabel(found.id, found.id),
+                        status: found.order_details?.originalStatus || found.status || 'Picked Up',
+                        total: originalTotal,
+                        items: combinedItems,
+                        customItems: combinedCustom,
+                        paymentStatus: found.order_details?.originalPaymentStatus || found.paymentStatus || 'Pending',
+                        paymentMethod: found.order_details?.originalPaymentMethod || found.paymentMethod || 'Cash',
+                        splitAmounts: found.order_details?.originalSplitAmounts || null,
+                        tableNo: found.tableNo,
+                        customer: found.customer || { name: 'Walk-in', phone: '' },
+                        date: found.date,
+                        time: found.time,
+                        timestamp: found.timestamp,
+                        item_names: generateItemNamesString(combinedItems, combinedCustom),
+                        order_details: found.order_details || {},
+                        recoverable: true,
+                        reconstructed: true
+                    };
+                }
+            }
+
+            return {
+                id: found.id,
+                displayId: cleanOrderNumberLabel(found.displayId, found.id),
+                status: found.status || 'Merged',
+                total: Number(found.total || 0),
+                items: {},
+                customItems: [],
+                paymentStatus: found.paymentStatus || 'Pending',
+                paymentMethod: found.paymentMethod || 'Cash',
+                splitAmounts: found.splitAmounts || null,
+                tableNo: found.tableNo,
+                customer: found.customer || { name: 'Walk-in', phone: '' },
+                date: found.date,
+                time: found.time,
+                timestamp: found.timestamp,
+                item_names: found.item_names || '',
+                order_details: found.order_details || {},
+                recoverable: false
+            };
+        }).filter(Boolean);
+
+        return rebuilt.length > 1 ? rebuilt : [];
+    };
+
+    const isMergedOrder = (order) => {
+        const sources = getMergedSources(order);
+        return sources.length > 1 ||
+            (Array.isArray(order?.mergedOrderIds) && order.mergedOrderIds.length > 1) ||
+            (Array.isArray(order?.order_details?.mergedOrderIds) && order.order_details.mergedOrderIds.length > 1) ||
+            String(order?.merged_order_label || '').includes(' + ') ||
+            String(order?.displayId || '').includes(' + ');
+    };
+
+    // Every order keeps the same Merge button. If it is already merged, the
+    // Merge screen shows its existing members and also allows adding another order.
+    const openMergeOrUnmerge = (order) => {
+        if (isMergedOrder(order)) {
+            setMergedOrderModal({ open: true, order: { ...order, mergedSources: getMergedSources(order) }, addOrderId: '' });
+            return;
+        }
+        setMergeModal({ open: true, firstId: String(order?.id || ''), secondId: '' });
+    };
+
+    // Unmerge one specific source order from a merged order.
+    // The source snapshot is restored as its own order and its items are removed
+    // from the visible merged master. Inventory is not changed because the stock
+    // was already consumed by the original orders and no new sale is created here.
+
+    // IMPORTANT: old merged child rows are stored in Supabase with status='Merged'.
+    // When we unmerge them, they must get a normal bill status again. In particular,
+    // a Pending payment must be restored as Picked Up so it appears in BOTH History
+    // and Pending Payments, while a Paid order appears in History.
+    const getRestoredOrderStatus = (source) => {
+        const paymentStatus = source?.paymentStatus || source?.order_details?.originalPaymentStatus || source?.order_details?.paymentStatus || 'Pending';
+        const savedStatus = source?.order_details?.originalStatus || source?.status || 'Picked Up';
+
+        if (savedStatus === 'Cancelled') return 'Cancelled';
+        if (paymentStatus === 'Pending') return 'Picked Up';
+        if (paymentStatus === 'Paid') return 'Picked Up';
+        return savedStatus === 'Merged' ? 'Picked Up' : savedStatus;
+    };
+
+    const unmergeSpecificOrder = async (mergedOrder, sourceIdInput) => {
+        const sourceId = Number(sourceIdInput);
+        if (!mergedOrder || !Number.isInteger(sourceId)) {
+            alert('Could not identify the order to unmerge.');
+            return;
+        }
+
+        const sources = getMergedSources(mergedOrder);
+        if (sources.length < 2) {
+            alert('This order does not contain enough merge information to unmerge.');
+            return;
+        }
+
+        const source = sources.find(s => Number(s.id) === sourceId);
+        if (!source) {
+            alert(`Order #${sourceId} was not found inside this merged order.`);
+            return;
+        }
+
+        if (source.recoverable === false) {
+            alert(`Order #${source.displayId || source.id} belongs to an older merge whose original item/payment snapshot was not saved. It can be displayed, but it cannot be safely unmerged without risking incorrect items or inventory.`);
+            return;
+        }
+
+        if (!window.confirm(`Unmerge Order #${source.displayId || source.id} from ${mergedOrder.displayId || mergedOrder.id}?\n\nThis will restore that specific order as a separate bill and restore its original Paid/Pending status.`)) {
+            return;
+        }
+
+        const remaining = sources.filter(s => Number(s.id) !== sourceId);
+        if (remaining.length === 0) {
+            alert('At least one order must remain.');
+            return;
+        }
+
+        const buildAggregate = (list) => {
+            const items = {};
+            list.forEach(src => {
+                Object.entries(src.items || {}).forEach(([menuId, qty]) => {
+                    items[menuId] = Number(items[menuId] || 0) + Number(qty || 0);
+                });
+            });
+            const customItems = list.flatMap(src => Array.isArray(src.customItems) ? src.customItems : []);
+            const total = list.reduce((sum, src) => sum + Number(src.total || 0), 0);
+            const payment = calculateMergedPayment(list);
+            const label = list.length === 1
+                ? String(list[0].displayId || list[0].id)
+                : list.map(src => src.displayId || src.id).join(' + ');
+            const status = payment.paymentStatus === 'Pending'
+                ? 'Picked Up'
+                : (list.every(src => src.status === 'Picked Up') ? 'Picked Up' : (list[0].status || 'Picked Up'));
+            return { items, customItems, total, payment, label, status };
+        };
+
+        const aggregate = buildAggregate(remaining);
+
+        // If the master itself is selected, make the first remaining source the
+        // new master so the selected original order can return as its own bill.
+        if (Number(mergedOrder.id) === sourceId) {
+            if (remaining.length === 1) {
+                const only = remaining[0];
+
+                const { error: restoreMasterError } = await supabase.from('orders').update({
+                    status: getRestoredOrderStatus(source),
+                    total: Number(source.total || 0),
+                    order_details: source.order_details || {},
+                    item_names: source.item_names || generateItemNamesString(source.items || {}, source.customItems || []),
+                    merged_into_id: null,
+                    merged_order_label: null
+                }).eq('id', source.id);
+                if (restoreMasterError) {
+                    alert(restoreMasterError.message || 'Could not restore the selected order.');
+                    return;
+                }
+
+                const { error: restoreOnlyError } = await supabase.from('orders').update({
+                    status: only.status || 'Picked Up',
+                    total: Number(only.total || 0),
+                    order_details: only.order_details || {},
+                    item_names: only.item_names || generateItemNamesString(only.items || {}, only.customItems || []),
+                    merged_into_id: null,
+                    merged_order_label: null
+                }).eq('id', only.id);
+                if (restoreOnlyError) {
+                    alert(restoreOnlyError.message || 'Could not restore the remaining order.');
+                    return;
+                }
+
+                await logOrderActivity(source.id, 'ORDER_UNMERGED', `Order #${source.id} was restored as a separate order from ${mergedOrder.displayId || mergedOrder.id}.`);
+                await logOrderActivity(only.id, 'ORDER_UNMERGED', `Order #${only.id} was restored as a separate order from ${mergedOrder.displayId || mergedOrder.id}.`);
+                await notifyOrderEvent(
+                    '↩️ Order Unmerged',
+                    `Orders #${source.id} and #${only.id} are separate again.`,
+                    { orderId: source.id, unmergedOrderId: source.id, action: 'ORDER_UNMERGED' },
+                    'success'
+                );
+
+                setViewOrderDetails(null);
+                setMergedOrderModal({ open: false, order: null });
+                await fetchOrders();
+                alert(`Order #${source.displayId || source.id} has been unmerged successfully.`);
+                return;
+            }
+
+            const newMaster = remaining[0];
+            const newMasterDetails = buildOperatorMeta({
+                ...(newMaster.order_details || {}),
+                items: aggregate.items,
+                customItems: aggregate.customItems,
+                total: aggregate.total,
+                paymentStatus: aggregate.payment.paymentStatus,
+                paymentMethod: aggregate.payment.paymentMethod,
+                splitAmounts: aggregate.payment.splitAmounts,
+                displayId: aggregate.label,
+                mergedOrderIds: remaining.map(src => src.id),
+                mergedFrom: aggregate.label,
+                mergedSources: remaining
+            });
+            delete newMasterDetails.id;
+            delete newMasterDetails.status;
+            delete newMasterDetails.total;
+            delete newMasterDetails.tableNo;
+
+            const { error: restoreSelectedError } = await supabase.from('orders').update({
+                status: getRestoredOrderStatus(source),
+                total: Number(source.total || 0),
+                order_details: source.order_details || {},
+                item_names: source.item_names || generateItemNamesString(source.items || {}, source.customItems || []),
+                merged_into_id: null,
+                merged_order_label: null
+            }).eq('id', source.id);
+            if (restoreSelectedError) {
+                alert(restoreSelectedError.message || 'Could not restore the selected order.');
+                return;
+            }
+
+            const { error: newMasterError } = await supabase.from('orders').update({
+                status: aggregate.status,
+                total: aggregate.total,
+                order_details: newMasterDetails,
+                item_names: generateItemNamesString(aggregate.items, aggregate.customItems),
+                merged_into_id: null,
+                merged_order_label: aggregate.label
+            }).eq('id', newMaster.id);
+            if (newMasterError) {
+                alert(newMasterError.message || 'Could not create the remaining merged master.');
+                return;
+            }
+
+            for (const child of remaining.slice(1)) {
+                await supabase.from('orders').update({
+                    status: 'Merged',
+                    order_details: buildOperatorMeta({
+                        ...(child.order_details || {}),
+                        mergedInto: newMaster.id,
+                        mergedLabel: aggregate.label,
+                        mergedAt: new Date().toISOString(),
+                        originalMergeSource: makeMergeSourceSnapshot(child)
+                    }),
+                    item_names: `Merged into Order #${newMaster.id} (${aggregate.label})`,
+                    merged_into_id: newMaster.id,
+                    merged_order_label: aggregate.label
+                }).eq('id', child.id);
+            }
+
+            await logOrderActivity(source.id, 'ORDER_UNMERGED', `Order #${source.id} was restored as a separate order. Remaining merged order is ${aggregate.label}.`);
+            await logOrderActivity(newMaster.id, 'ORDER_UNMERGED', `Order #${source.id} was removed from the merged group. New merged master: ${aggregate.label}.`);
+            await notifyOrderEvent(
+                '↩️ Order Unmerged',
+                `Order #${source.displayId || source.id} was separated. Remaining orders are ${aggregate.label}.`,
+                { orderId: newMaster.id, unmergedOrderId: source.id, action: 'ORDER_UNMERGED' },
+                'success'
+            );
+
+            setViewOrderDetails(null);
+            setMergedOrderModal({ open: false, order: null });
+            await fetchOrders();
+            alert(`Order #${source.displayId || source.id} has been unmerged successfully.`);
+            return;
+        }
+
+        // Normal case: remove one child from the existing master.
+        const newMasterDetails = buildOperatorMeta({
+            ...(mergedOrder.order_details || {}),
+            items: aggregate.items,
+            customItems: aggregate.customItems,
+            total: aggregate.total,
+            paymentStatus: aggregate.payment.paymentStatus,
+            paymentMethod: aggregate.payment.paymentMethod,
+            splitAmounts: aggregate.payment.splitAmounts,
+            displayId: aggregate.label,
+            mergedOrderIds: remaining.length > 1 ? remaining.map(src => src.id) : null,
+            mergedFrom: remaining.length > 1 ? aggregate.label : null,
+            mergedSources: remaining.length > 1 ? remaining : null
+        });
+
+        delete newMasterDetails.id;
+        delete newMasterDetails.status;
+        delete newMasterDetails.total;
+        delete newMasterDetails.tableNo;
+
+        const { error: restoreError } = await supabase.from('orders').update({
+            status: getRestoredOrderStatus(source),
+            total: Number(source.total || 0),
+            order_details: source.order_details || {},
+            item_names: source.item_names || generateItemNamesString(source.items || {}, source.customItems || []),
+            merged_into_id: null,
+            merged_order_label: null
+        }).eq('id', source.id);
+
+        if (restoreError) {
+            alert(restoreError.message || 'Could not restore the selected order.');
+            return;
+        }
+
+        const { error: masterError } = await supabase.from('orders').update({
+            total: aggregate.total,
+            status: remaining.length === 1 ? getRestoredOrderStatus(remaining[0]) : aggregate.status,
+            order_details: newMasterDetails,
+            item_names: generateItemNamesString(aggregate.items, aggregate.customItems),
+            merged_order_label: remaining.length > 1 ? aggregate.label : null,
+            merged_into_id: null
+        }).eq('id', mergedOrder.id);
+
+        if (masterError) {
+            await supabase.from('orders').update({
+                status: 'Merged',
+                order_details: buildOperatorMeta({
+                    ...(source.order_details || {}),
+                    mergedInto: mergedOrder.id,
+                    mergedLabel: mergedOrder.displayId || mergedOrder.id,
+                    mergedAt: new Date().toISOString(),
+                    originalMergeSource: makeMergeSourceSnapshot(source)
+                }),
+                item_names: `Merged into Order #${mergedOrder.id} (${mergedOrder.displayId || mergedOrder.id})`,
+                merged_into_id: mergedOrder.id,
+                merged_order_label: mergedOrder.displayId || mergedOrder.id
+            }).eq('id', source.id);
+            alert(masterError.message || 'Could not update the merged order.');
+            return;
+        }
+
+        await logOrderActivity(mergedOrder.id, 'ORDER_UNMERGED', `Order #${source.id} was unmerged from ${mergedOrder.displayId || mergedOrder.id}.`);
+        await logOrderActivity(source.id, 'ORDER_UNMERGED', `Order #${source.id} was restored as a separate order from ${mergedOrder.displayId || mergedOrder.id}.`);
+        await notifyOrderEvent(
+            '↩️ Order Unmerged',
+            `Order #${source.displayId || source.id} was separated from ${mergedOrder.displayId || mergedOrder.id}.`,
+            { orderId: mergedOrder.id, unmergedOrderId: source.id, action: 'ORDER_UNMERGED' },
+            'success'
+        );
+
+        setViewOrderDetails(null);
+        setMergedOrderModal({ open: false, order: null });
+        await fetchOrders();
+        alert(`Order #${source.displayId || source.id} has been unmerged successfully.`);
+    };
+
     const getSortedHistory = () => {
         let history = orders
-            .filter(o => o.status === 'Picked Up' || o.status === 'Cancelled')
+            .filter(o => (o.status === 'Picked Up' || o.status === 'Cancelled') && o.status !== 'Merged')
             .sort((a, b) => b.id - a.id);
 
         if (historyItemSearch.trim() !== '') {
@@ -3395,14 +4773,14 @@ const handleCreateBill = async () => {
     };
 
     const getFilteredLiveOrders = () => {
-        let live = orders.filter(o => o.status !== 'Picked Up' && o.status !== 'Cancelled');
+        let live = orders.filter(o => o.status !== 'Picked Up' && o.status !== 'Cancelled' && o.status !== 'Merged');
         if (selectedTableFilter !== 'All') live = live.filter(o => String(o.tableNo) === String(selectedTableFilter));
         return live.sort((a,b) => b.timestamp - a.timestamp);
     };
     
     const pendingOrders = orders.filter(o => o.status === 'Received').length;
-    const pendingPaymentOrdersCount = orders.filter(o => o.status === 'Picked Up' && o.paymentStatus === 'Pending').length;
-    const pendingPaymentList = orders.filter(o => o.status === 'Picked Up' && o.paymentStatus === 'Pending').sort((a,b) => b.id - a.id);
+    const pendingPaymentOrdersCount = orders.filter(o => o.status === 'Picked Up' && o.paymentStatus === 'Pending' && o.status !== 'Merged').length;
+    const pendingPaymentList = orders.filter(o => o.status === 'Picked Up' && o.paymentStatus === 'Pending' && o.status !== 'Merged').sort((a,b) => b.id - a.id);
 
     const filteredMenuSuggestions = menuItems.filter(i => i.name.toLowerCase().includes(billItemSearch.toLowerCase()));
     const filteredInvSuggestions = inventoryItems.filter(i => i.name.toLowerCase().includes(billItemSearch.toLowerCase()));
@@ -3481,7 +4859,43 @@ const handleCreateBill = async () => {
             </div>
         )}
 
-{/* --- ADMIN OVERRIDE MODAL FOR MENU EDITS --- */}
+{/* --- REMOVE ITEM INVENTORY DECISION MODAL --- */}
+            {removeItemConfirm.open && (
+                <div className="fixed inset-0 z-[450] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
+                    <div className="bg-slate-800 border border-orange-500/30 p-7 rounded-3xl shadow-2xl text-center w-full max-w-md relative">
+                        <div className="w-16 h-16 bg-orange-500/10 rounded-2xl mx-auto flex items-center justify-center mb-5 text-3xl border border-orange-500/20">🍽️</div>
+                        <h2 className="text-xl font-black text-white mb-2">Remove {removeItemConfirm.itemName}?</h2>
+                        <p className="text-sm text-gray-400 mb-7">Has this item already been made?</p>
+                        <div className="grid grid-cols-2 gap-3">
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    const action = removeItemConfirm.onDecision;
+                                    setRemoveItemConfirm({ open: false, itemName: '', onDecision: null });
+                                    if (action) await action(true);
+                                }}
+                                className="bg-red-500 hover:bg-red-400 text-white font-black py-3.5 rounded-xl transition"
+                            >
+                                Yes — Made
+                            </button>
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    const action = removeItemConfirm.onDecision;
+                                    setRemoveItemConfirm({ open: false, itemName: '', onDecision: null });
+                                    if (action) await action(false);
+                                }}
+                                className="bg-green-500 hover:bg-green-400 text-black font-black py-3.5 rounded-xl transition"
+                            >
+                                No — Return Stock
+                            </button>
+                        </div>
+                        <button type="button" onClick={() => setRemoveItemConfirm({ open: false, itemName: '', onDecision: null })} className="w-full mt-3 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl">Cancel</button>
+                    </div>
+                </div>
+            )}
+
+            {/* --- ADMIN OVERRIDE MODAL FOR MENU EDITS --- */}
             {actionAuth.open && (
                 <div className="fixed inset-0 z-[400] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
                     <div className="bg-slate-800 border border-white/10 p-10 rounded-[3rem] shadow-2xl text-center w-full max-w-sm relative">
@@ -4040,16 +5454,16 @@ const handleCreateBill = async () => {
                                         const mItem = menuItems.find(i => i.id === parseInt(id));
                                         const price = mItem ? parseInt(String(mItem.price).replace(/[^0-9]/g, '')) : 0;
                                         return (
-                                            <div key={`menu_${id}`} className="flex justify-between items-center border-b border-white/5 pb-2 last:border-0 last:pb-0">
+                                            <div key={`menu_${id}`} className="flex justify-between items-center border-b border-white/5 pb-2 last:border-0 last:pb-0 gap-2">
                                                 <div><span className="text-white">{qty}x {mItem?.name || 'Item'}</span></div>
-                                                <div className="text-cyan-400 font-bold">₹{price * qty}</div>
+                                                <div className="flex items-center gap-2"><span className="text-cyan-400 font-bold">₹{price * qty}</span><button type="button" onClick={() => handleHistoryDeleteItem({ menuId: Number(id) })} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white px-2 py-1 rounded text-[10px] font-bold">🗑</button></div>
                                             </div>
                                         );
                                     })}
                                     {(editHistoryModal.order.customItems || []).map(cItem => (
-                                        <div key={cItem.id} className="flex justify-between items-center border-b border-white/5 pb-2 last:border-0 last:pb-0">
+                                        <div key={cItem.id} className="flex justify-between items-center border-b border-white/5 pb-2 last:border-0 last:pb-0 gap-2">
                                             <div><span className="text-white">{cItem.qty}x {cItem.name} {cItem.isInv && '📦'}</span></div>
-                                            <div className="text-cyan-400 font-bold">₹{cItem.price * cItem.qty}</div>
+                                            <div className="flex items-center gap-2"><span className="text-cyan-400 font-bold">₹{cItem.price * cItem.qty}</span><button type="button" onClick={() => handleHistoryDeleteItem({ customId: cItem.id })} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white px-2 py-1 rounded text-[10px] font-bold">🗑</button></div>
                                         </div>
                                     ))}
                                     {Object.keys(editHistoryModal.order.items || {}).length === 0 && (editHistoryModal.order.customItems || []).length === 0 && <div className="text-xs text-gray-500 italic">No items in this order.</div>}
@@ -4158,6 +5572,96 @@ const handleCreateBill = async () => {
             )}
 
             
+
+          {/* --- RECIPE EDITOR MODAL --- */}
+          {recipeModal.open && (
+              <div className="fixed inset-0 z-[125] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                  <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-2xl border border-orange-500/30 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+                      <button onClick={() => { setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] }); }} className="absolute top-4 right-4 text-gray-400 hover:text-red-400 text-2xl">✕</button>
+                      <h3 className="text-xl font-black text-orange-400 mb-1">🍳 Recipe — {recipeModal.menuItem?.name}</h3>
+                      <p className="text-xs text-gray-400 mb-6">Select the inventory item and exact quantity consumed for one sale.</p>
+
+                      {recipeModal.rows.length === 0 && (
+                          <div className="bg-black/20 border border-white/5 rounded-xl p-5 text-sm text-gray-400 text-center mb-4">
+                              No ingredients added yet.
+                          </div>
+                      )}
+
+                      <div className="space-y-3">
+                          {recipeModal.rows.map((row, index) => {
+                              const inv = inventoryItems.find(i => Number(i.id) === Number(row.inventory_item_id));
+                              const inventoryUnit = inv?.unit || 'Unit';
+                              return (
+                                  <div key={row.id || `${row.inventory_item_id}_${index}`} className="bg-black/20 border border-white/10 rounded-xl p-3 grid grid-cols-1 md:grid-cols-[1fr_120px_120px_44px] gap-2 items-center">
+                                      <div className="relative">
+                                          <input
+                                              type="text"
+                                              value={row.recipeSearch ?? ''}
+                                              onChange={e => {
+                                                  const value = e.target.value;
+                                                  updateRecipeRow(index, 'recipeSearch', value);
+                                                  if (!value.trim()) updateRecipeRow(index, 'inventory_item_id', '');
+                                              }}
+                                              onFocus={() => {
+                                                  if (row.inventory_item_id) {
+                                                      const selected = inventoryItems.find(i => Number(i.id) === Number(row.inventory_item_id));
+                                                      if (selected) updateRecipeRow(index, 'recipeSearch', selected.name);
+                                                  }
+                                              }}
+                                              className="w-full bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm outline-none focus:border-orange-500"
+                                              placeholder="Type inventory item name..."
+                                          />
+                                          {!!String(row.recipeSearch || '').trim() && (
+                                              <div className="absolute z-20 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-slate-900 border border-orange-500/30 rounded-lg shadow-2xl">
+                                                  {inventoryItems
+                                                      .filter(item => String(item.name || '').toLowerCase().includes(String(row.recipeSearch || '').toLowerCase()))
+                                                      .slice(0, 10)
+                                                      .map(item => (
+                                                          <button
+                                                              key={item.id}
+                                                              type="button"
+                                                              onClick={() => {
+                                                                  updateRecipeRow(index, 'inventory_item_id', item.id);
+                                                                  updateRecipeRow(index, 'unit', item.unit || 'Unit');
+                                                                  updateRecipeRow(index, 'recipeSearch', item.name);
+                                                              }}
+                                                              className="w-full text-left px-3 py-2.5 text-sm text-white hover:bg-orange-500/20 border-b border-white/5 last:border-0"
+                                                          >
+                                                              <span className="font-semibold">{item.name}</span>
+                                                              <span className="text-xs text-gray-400 ml-2">({item.unit || 'Unit'}) • Stock {item.stock}</span>
+                                                          </button>
+                                                      ))}
+                                                  {inventoryItems.filter(item => String(item.name || '').toLowerCase().includes(String(row.recipeSearch || '').toLowerCase())).length === 0 && (
+                                                      <div className="px-3 py-3 text-xs text-gray-500">No inventory item found.</div>
+                                                  )}
+                                              </div>
+                                          )}
+                                      </div>
+
+                                      <input type="number" min="0.001" step="0.001" value={row.quantity} onChange={e => updateRecipeRow(index, 'quantity', e.target.value)} className="bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm" placeholder="Quantity" />
+
+                                      <select value={row.unit || inventoryUnit} onChange={e => updateRecipeRow(index, 'unit', e.target.value)} className="bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm">
+                                          <option value="Packet">Packet</option>
+                                          <option value="Kg">Kg</option>
+                                          <option value="Gram">Gram</option>
+                                          <option value="Unit">Unit</option>
+                                      </select>
+
+                                      <button type="button" onClick={() => removeRecipeRow(index)} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white rounded-lg p-3">🗑</button>
+                                  </div>
+                              );
+                          })}
+                      </div>
+
+                      <div className="flex flex-wrap gap-3 mt-5">
+                          <button type="button" onClick={addRecipeRow} disabled={!inventoryItems.length} className="bg-orange-500/20 text-orange-400 hover:bg-orange-500 hover:text-white px-4 py-3 rounded-xl font-bold disabled:opacity-40">+ Add Ingredient</button>
+                          <button type="button" onClick={() => { setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] }); }} className="bg-slate-700 text-white px-5 py-3 rounded-xl font-bold">Cancel</button>
+                          <button type="button" onClick={saveRecipeEditor} className="bg-orange-500 hover:bg-orange-400 text-black px-6 py-3 rounded-xl font-black">Save Recipe</button>
+                      </div>
+                  </div>
+              </div>
+          )}
+
           {/* --- INVENTORY MODAL --- */}
 {invModal.open && (
     <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
@@ -4188,6 +5692,15 @@ const handleCreateBill = async () => {
                         <label className="text-xs text-gray-400">Price (₹)</label>
                         <input name="price" type="number" min="0" defaultValue={invModal.data?.price} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500" required />
                     </div>
+                </div>
+                <div className="mt-4">
+                    <label className="text-xs text-gray-400">Inventory Unit</label>
+                    <select name="unit" defaultValue={invModal.data?.unit || 'Unit'} className="w-full bg-black/30 border border-white/10 rounded-lg p-3 text-white mt-1 outline-none focus:border-cyan-500 font-bold">
+                        <option value="Packet">📦 Packet</option>
+                        <option value="Kg">⚖️ Kg</option>
+                        <option value="Gram">⚖️ Gram</option>
+                        <option value="Unit">🔢 Unit</option>
+                    </select>
                 </div>
                 <div className="flex gap-2 mt-4">
                     <button type="button" onClick={() => setInvModal({open: false, mode: 'add', data: null})} className="flex-1 bg-red-500/20 text-red-400 py-3 rounded-xl hover:bg-red-500 hover:text-white transition">Cancel</button>
@@ -4276,6 +5789,34 @@ const handleCreateBill = async () => {
                                 <span className="font-bold">Last updated by:</span> {viewOrderDetails.last_updated_by_name || 'Before tracking'}
                             </div>
                         </div>
+                        {getMergedSources(viewOrderDetails).length > 1 && (
+                            <div className="mb-4 rounded-xl border border-purple-200 bg-purple-50 p-3">
+                                <div className="text-xs font-black text-purple-700 mb-2">🔗 Merged Orders</div>
+                                <div className="space-y-2">
+                                    {getMergedSources(viewOrderDetails).map(source => (
+                                        <div key={source.id} className="flex items-center justify-between gap-2 bg-white rounded-lg p-2 border border-purple-100">
+                                            <div>
+                                                <div className="text-xs font-black text-gray-900">Order #{cleanOrderNumberLabel(source.displayId, source.id)}</div>
+                                                <div className="text-[10px] text-gray-500">₹{Number(source.total || 0)} • {source.status || 'Picked Up'}</div>
+                                            </div>
+                                            {source.recoverable !== false ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => unmergeSpecificOrder(viewOrderDetails, source.id)}
+                                                    className="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded-lg text-[10px] font-black whitespace-nowrap"
+                                                >
+                                                    🗑 Unmerge #{cleanOrderNumberLabel(source.displayId, source.id)}
+                                                </button>
+                                            ) : (
+                                                <span className="text-[9px] font-bold text-gray-500">Old merge data</span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="text-[10px] text-purple-600 mt-2">Select the specific original order you want to separate.</div>
+                            </div>
+                        )}
+
                         <button type="button" onClick={() => { setViewOrderDetails(null); }} className="w-full bg-slate-200 hover:bg-slate-300 text-black font-bold py-3 rounded-xl transition">Close</button>
                     </div>
                 </div>
@@ -4367,6 +5908,34 @@ const handleCreateBill = async () => {
                     </div>
                 </div>
             )}
+
+            {paymentQrModal.open && (() => {
+                const qrUri = paymentQrModal.historyPayload?.upiUri || buildUpiPaymentUri(paymentQrModal.amount, paymentQrModal.orderId);
+                const qrImage = buildUpiQrImageUrl(qrUri);
+                return (
+                    <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4">
+                        <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-sm border border-white/10 text-center shadow-2xl animate-scale-in">
+                            <h3 className="text-xl font-black text-white mb-1">Scan to Pay</h3>
+                            <p className="text-sm text-gray-400 mb-4">Exact online amount</p>
+                            <div className="text-3xl font-black text-cyan-400 mb-4">₹{Number(paymentQrModal.amount || 0).toFixed(2)}</div>
+                            <div className="bg-white rounded-2xl p-3 mx-auto w-fit shadow-xl">
+                                {qrImage ? <img src={qrImage} alt="UPI Payment QR" className="w-64 h-64 object-contain" /> : <div className="w-64 h-64 flex items-center justify-center text-black">QR unavailable</div>}
+                            </div>
+                            {paymentQrModal.splitAmounts && (
+                                <div className="mt-4 rounded-xl bg-black/20 border border-white/10 p-3 text-sm">
+                                    <div className="text-green-400 font-bold">Cash: ₹{Number(paymentQrModal.splitAmounts.cash || 0).toFixed(2)}</div>
+                                    <div className="text-blue-400 font-bold">Online: ₹{Number(paymentQrModal.splitAmounts.online || 0).toFixed(2)}</div>
+                                </div>
+                            )}
+                            <p className="text-[11px] text-gray-500 mt-4">Scan with any supported UPI app. The amount is pre-filled by the QR.</p>
+                            <div className="flex gap-2 mt-5">
+                                <button type="button" onClick={closePaymentQrModal} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl">Cancel</button>
+                                <button type="button" onClick={confirmQrPayment} className="flex-1 bg-green-500 hover:bg-green-400 text-black font-black py-3 rounded-xl">Payment Received</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
 
             {adminPaymentModal.open && (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
@@ -4936,29 +6505,156 @@ const handleCreateBill = async () => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {orders.filter(o => o.paymentStatus === 'Pending').map(order => (
+                                    {orders.filter(o => o.paymentStatus === 'Pending' && o.status !== 'Merged').map(order => (
                                         <tr key={order.id} className="border-b border-white/5 hover:bg-white/5">
-                                            <td className="p-4 font-mono text-white">#{order.displayId || order.id}</td>
+                                            <td className={`p-4 font-mono text-white ${isMergedOrder(order) ? 'cursor-pointer hover:text-orange-300 underline decoration-dotted underline-offset-4' : ''}`} onClick={() => isMergedOrder(order) && openMergeOrUnmerge(order)} title={isMergedOrder(order) ? 'Click to view merged orders and unmerge a specific order' : undefined}>#{order.displayId || order.id}</td>
                                             <td className="p-4 whitespace-nowrap">{order.date} <span className="text-[10px] text-gray-500 block">{order.time}</span></td>
                                             <td className="p-4 font-bold text-white">{order.customer?.name || 'Walk-in'} {order.customer?.phone && <span className="block text-[10px] text-gray-400 font-normal">{order.customer.phone}</span>}</td>
                                             <td className="p-4 font-bold text-red-400">₹{order.total}</td>
                                             <td className="p-4 text-center">
-                                                <button onClick={() => { 
-                                                    setPendingModal(false); 
-                                                    setEditHistoryModal({open: true, order: order, tempMethod: order.paymentMethod}); 
-                                                }} className="bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white px-4 py-2 rounded-lg text-xs font-bold transition shadow-lg whitespace-nowrap">
-                                                    Edit & Pay
-                                                </button>
+                                                <div className="flex gap-2 justify-center flex-wrap">
+                                                    <button onClick={() => { 
+                                                        setPendingModal(false); 
+                                                        setEditHistoryModal({open: true, order: order, tempMethod: order.paymentMethod || 'Cash'}); 
+                                                    }} className="bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white px-4 py-2 rounded-lg text-xs font-bold transition shadow-lg whitespace-nowrap">
+                                                        Edit & Pay
+                                                    </button>
+                                                    <button onClick={() => openMergeOrUnmerge(order)} className="bg-purple-500/20 text-purple-400 hover:bg-purple-500 hover:text-white px-4 py-2 rounded-lg text-xs font-bold transition whitespace-nowrap">
+                                                        🔗 Merge
+                                                    </button>
+                                                </div>
                                             </td>
                                         </tr>
                                     ))}
                                 </tbody>
                             </table>
-                            {orders.filter(o => o.paymentStatus === 'Pending').length === 0 && <div className="p-10 text-center text-gray-500 text-sm font-bold">No pending payments! 🎉</div>}
+                            {orders.filter(o => o.paymentStatus === 'Pending' && o.status !== 'Merged').length === 0 && <div className="p-10 text-center text-gray-500 text-sm font-bold">No pending payments! 🎉</div>}
                         </div>
                     </div>
                 </div>
             )}
+
+
+          {/* --- MERGED ORDER / ADD ORDER / SPECIFIC UNMERGE MODAL --- */}
+          {mergedOrderModal.open && mergedOrderModal.order && (
+              <div className="fixed inset-0 z-[270] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                  <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-lg border border-purple-500/30 shadow-2xl relative max-h-[88vh] flex flex-col">
+                      <button onClick={() => setMergedOrderModal({ open: false, order: null })} className="absolute top-4 right-4 text-gray-400 hover:text-red-400 text-2xl">✕</button>
+                      <div className="mb-4 pr-8">
+                          <h3 className="text-xl font-black text-purple-400">🔗 Merge Orders</h3>
+                          <p className="text-xs text-gray-400 mt-1">Add another order to this merged bill, or remove one specific order.</p>
+                          <div className="mt-3 bg-purple-500/10 border border-purple-500/20 rounded-xl p-3">
+                              <div className="text-sm font-black text-white">Merged: #{cleanOrderNumberLabel(mergedOrderModal.order.displayId, mergedOrderModal.order.id)}</div>
+                              <div className="text-xs text-gray-400 mt-1">Combined total: ₹{Number(mergedOrderModal.order.total || 0)}</div>
+                          </div>
+                      </div>
+
+                      <div className="mb-4">
+                          <label className="text-xs text-gray-400 font-bold">Add Order Number</label>
+                          <div className="flex gap-2 mt-1">
+                              <input
+                                  type="number"
+                                  min="1"
+                                  value={mergedOrderModal.addOrderId || ''}
+                                  onChange={e => setMergedOrderModal(prev => ({ ...prev, addOrderId: e.target.value }))}
+                                  placeholder="e.g. 823"
+                                  className="flex-1 bg-black/30 border border-white/10 rounded-xl p-3 text-white outline-none focus:border-purple-500"
+                              />
+                              <button
+                                  type="button"
+                                  onClick={() => mergeOrdersByNumber(mergedOrderModal.order.id, mergedOrderModal.addOrderId)}
+                                  className="bg-purple-500 hover:bg-purple-400 text-white px-4 rounded-xl font-black"
+                              >
+                                  Merge
+                              </button>
+                          </div>
+                      </div>
+
+                      <div className="text-xs font-black uppercase tracking-wide text-gray-400 mb-2">Orders currently merged</div>
+                      <div className="overflow-y-auto space-y-2 pr-1 flex-1 min-h-0">
+                          {getMergedSources(mergedOrderModal.order).map((source, index) => (
+                              <div key={`merged-source-${mergedOrderModal.order.id}-${source.id}-${index}`} className="bg-slate-900/70 border border-white/10 rounded-xl p-3 flex items-center justify-between gap-3">
+                                  <div className="min-w-0">
+                                      <div className="text-sm font-black text-white truncate">#{cleanOrderNumberLabel(source.displayId, source.id)}</div>
+                                      <div className="text-[11px] text-gray-400 mt-1">
+                                          {source.recoverable ? `₹${Number(source.total || 0)} • ${source.paymentStatus || 'Pending'} • ${source.paymentMethod || 'Cash'}` : 'Original item snapshot unavailable in this older merge'}
+                                      </div>
+                                  </div>
+                                  {source.recoverable ? (
+                                      <button
+                                          type="button"
+                                          onClick={() => unmergeSpecificOrder(mergedOrderModal.order, source.id)}
+                                          className="shrink-0 bg-red-500/20 hover:bg-red-500 text-red-300 hover:text-white px-3 py-2 rounded-lg text-[11px] font-black transition"
+                                      >
+                                          🗑 Unmerge
+                                      </button>
+                                  ) : (
+                                      <span className="shrink-0 text-[10px] font-bold text-gray-500 px-2 text-right">Old data</span>
+                                  )}
+                              </div>
+                          ))}
+
+                          {getMergedSources(mergedOrderModal.order).length <= 1 && (
+                              <div className="p-4 text-center text-red-300 text-sm font-bold bg-red-500/10 rounded-xl border border-red-500/20">
+                                  No saved source list was found for this merged order.
+                              </div>
+                          )}
+                      </div>
+
+                      <button type="button" onClick={() => setMergedOrderModal({ open: false, order: null })} className="w-full mt-4 bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-xl font-bold">Close</button>
+                  </div>
+              </div>
+          )}
+
+          {/* --- MERGE ORDERS MODAL --- */}
+          {mergeModal.open && (
+              <div className="fixed inset-0 z-[260] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+                  <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-md border border-purple-500/30 shadow-2xl relative">
+                      <button onClick={() => setMergeModal({ open: false, firstId: '', secondId: '' })} className="absolute top-4 right-4 text-gray-400 hover:text-red-400 text-2xl">✕</button>
+                      <div className="mb-6">
+                          <h3 className="text-xl font-black text-purple-400">🔗 Merge Orders</h3>
+                          <p className="text-xs text-gray-400 mt-1">Enter the two order numbers you want to combine.</p>
+                      </div>
+
+                      <div className="space-y-4">
+                          <div>
+                              <label className="text-xs text-gray-400 font-bold">First Order Number</label>
+                              <input
+                                  type="number"
+                                  min="1"
+                                  value={mergeModal.firstId}
+                                  onChange={e => setMergeModal(prev => ({ ...prev, firstId: e.target.value }))}
+                                  placeholder="e.g. 101"
+                                  className="w-full bg-black/30 border border-white/10 rounded-xl p-3 text-white mt-1 outline-none focus:border-purple-500"
+                              />
+                          </div>
+                          <div className="text-center text-gray-500 font-black">+</div>
+                          <div>
+                              <label className="text-xs text-gray-400 font-bold">Second Order Number</label>
+                              <input
+                                  type="number"
+                                  min="1"
+                                  value={mergeModal.secondId}
+                                  onChange={e => setMergeModal(prev => ({ ...prev, secondId: e.target.value }))}
+                                  placeholder="e.g. 36"
+                                  className="w-full bg-black/30 border border-white/10 rounded-xl p-3 text-white mt-1 outline-none focus:border-purple-500"
+                              />
+                          </div>
+                          <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4 text-sm text-gray-300">
+                              After merging, History will show one bill as
+                              <strong className="text-white ml-1">
+                                  #{mergeModal.firstId || '101'} + {mergeModal.secondId || '36'}
+                              </strong>
+                              and the combined total of both orders.
+                          </div>
+                          <div className="flex gap-3">
+                              <button type="button" onClick={() => setMergeModal({ open: false, firstId: '', secondId: '' })} className="flex-1 bg-slate-700 text-white py-3 rounded-xl font-bold">Cancel</button>
+                              <button type="button" onClick={() => mergeOrdersByNumber(mergeModal.firstId, mergeModal.secondId)} className="flex-1 bg-purple-500 hover:bg-purple-400 text-white py-3 rounded-xl font-black">Merge Orders</button>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          )}
 
           {/* SIDEBAR */}
             {isSidebarOpen && (<div onClick={() => setIsSidebarOpen(false)} className="fixed inset-0 bg-black/80 z-40 md:hidden backdrop-blur-sm animate-fade-in"></div>)}
@@ -5484,15 +7180,20 @@ onClick={requestValoNotificationPermission}
                                                                         <td className="p-4 text-center font-bold">{exp.qty}x</td>
                                                                         <td className="p-4 text-right text-gray-500 text-xs">@₹{exp.price}</td>
                                                                         <td className="p-4">
-                                                                            {String(exp.item_name || '').toLowerCase() === 'money' ? (
-                                                                                <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                                                                                    exp.cash_source === 'Daily Cash Box'
-                                                                                        ? 'bg-orange-500/20 text-orange-400'
-                                                                                        : 'bg-cyan-500/20 text-cyan-400'
-                                                                                }`}>
-                                                                                    {exp.cash_source === 'Daily Cash Box' ? '💵 Daily Cash Box' : '👤 Personal Money'}
+                                                                            {String(exp.item_name || '').toLowerCase() === 'money' && (
+                                                                                <span
+                                                                                    className={
+                                                                                        exp.cash_source === 'Daily Cash Box'
+                                                                                            ? 'text-[10px] font-bold px-2 py-1 rounded-full bg-orange-500/20 text-orange-400'
+                                                                                            : 'text-[10px] font-bold px-2 py-1 rounded-full bg-cyan-500/20 text-cyan-400'
+                                                                                    }
+                                                                                >
+                                                                                    {exp.cash_source === 'Daily Cash Box'
+                                                                                        ? '💵 Daily Cash Box'
+                                                                                        : '👤 Personal Money'}
                                                                                 </span>
-                                                                            ) : (
+                                                                            )}
+                                                                            {String(exp.item_name || '').toLowerCase() !== 'money' && (
                                                                                 <span className="text-gray-600 text-xs">—</span>
                                                                             )}
                                                                         </td>
@@ -6278,8 +7979,8 @@ onClick={requestValoNotificationPermission}
                                                 }).map((item, idx) => ( 
                                                     <div key={idx} className={`flex items-center gap-3 bg-black/20 p-3 rounded-xl border ${item.in_stock === false ? 'border-red-500/30 opacity-75' : 'border-white/5 hover:border-white/10 transition'}`}>
                                                         <img src={item.img} className={`w-12 h-12 rounded-lg object-cover ${item.in_stock === false ? 'grayscale' : ''}`} />
-                                                        <div className="flex-1 min-w-0"><h4 className="font-bold text-sm truncate">{item.name} {item.is_special && '⭐'}</h4><p className="text-xs text-gray-500">{item.price}</p></div>
-                                                        <div className="flex gap-2"><button onClick={() => toggleSpecial(item)} className={`p-2 rounded text-xs ${item.is_special ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-400'}`}>★</button><button onClick={() => setItemModal({open:true, mode:'edit', data:item})} className="text-xs bg-blue-500/10 text-blue-400 p-2 rounded hover:bg-blue-50 hover:text-white">✏️</button><button onClick={() => toggleStock(item)} className={`text-[10px] font-bold px-2 py-1 rounded transition ${item.in_stock !== false ? 'bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-black' : 'bg-red-500/20 text-red-400 hover:bg-red-50 hover:text-white'}`}>{item.in_stock !== false ? 'In' : 'Out'}</button><button onClick={() => deleteItem(item.id)} className="text-xs bg-red-500/10 text-red-400 p-2 rounded hover:bg-red-50 hover:text-white">🗑</button></div>
+                                                        <div className="flex-1 min-w-0"><h4 className="font-bold text-sm truncate">{item.name} {item.is_special && '⭐'}</h4><p className="text-xs text-gray-500">{item.price} {menuRecipes[item.id]?.length ? `• 🍳 ${menuRecipes[item.id].length} ingredients` : ''}</p></div>
+                                                        <div className="flex gap-2"><button onClick={() => toggleSpecial(item)} className={`p-2 rounded text-xs ${item.is_special ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-400'}`}>★</button><button onClick={() => setItemModal({open:true, mode:'edit', data:item})} className="text-xs bg-blue-500/10 text-blue-400 p-2 rounded hover:bg-blue-50 hover:text-white">✏️</button><button onClick={() => openRecipeEditor(item)} className="text-xs bg-orange-500/10 text-orange-400 p-2 rounded hover:bg-orange-500 hover:text-white" title="Recipe">🍳</button><button onClick={() => toggleStock(item)} className={`text-[10px] font-bold px-2 py-1 rounded transition ${item.in_stock !== false ? 'bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-black' : 'bg-red-500/20 text-red-400 hover:bg-red-50 hover:text-white'}`}>{item.in_stock !== false ? 'In' : 'Out'}</button><button onClick={() => deleteItem(item.id)} className="text-xs bg-red-500/10 text-red-400 p-2 rounded hover:bg-red-50 hover:text-white">🗑</button></div>
                                                     </div> 
                                                 ))}
                                             </div>
@@ -6373,7 +8074,7 @@ onClick={requestValoNotificationPermission}
                                         <button onClick={() => setPendingModal(true)} className="bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 text-red-400 px-4 py-2 rounded-xl text-sm font-bold transition shadow-lg flex items-center gap-2">
                                     ⚠️ Pending
                                     <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full">
-                                        {orders.filter(o => o.paymentStatus === 'Pending').length}
+                                        {orders.filter(o => o.paymentStatus === 'Pending' && o.status !== 'Merged').length}
                                     </span>
                                 </button>
                                        
@@ -6451,6 +8152,10 @@ onClick={requestValoNotificationPermission}
                                                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                                                         </button>
 
+                                                        <button onClick={() => openMergeOrUnmerge(order)} className="bg-purple-500/20 hover:bg-purple-500 text-purple-400 hover:text-white p-2 rounded-lg transition" title="Merge Order">
+                                                            🔗
+                                                        </button>
+
                                                         {/* WHATSAPP PDF BUTTON */}
                                                         {order.paymentStatus === 'Paid' && (
                                                             <button onClick={(e) => sendWhatsAppPDF(order, e)} className="bg-[#25D366]/20 hover:bg-[#25D366] text-[#25D366] hover:text-white p-2 rounded-lg transition" title="Share Bill as PDF">
@@ -6475,6 +8180,52 @@ onClick={requestValoNotificationPermission}
                     {activeTab === 'settings' && (
                         <div className="max-w-4xl mx-auto space-y-8 pb-10">
                             <h2 className="text-2xl font-bold mb-6">App Settings</h2>
+
+                            <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-green-500">
+                                <h3 className="text-xl font-bold mb-1 text-white">UPI Payment Settings</h3>
+                                <p className="text-sm text-gray-400 mb-4">Set the VALO UPI ID used by Online and Split-payment QR codes. This value is saved in Supabase and is shared across admin devices.</p>
+                                <form onSubmit={async (e) => {
+                                    e.preventDefault();
+                                    const value = String(e.target.upiId.value || '').trim();
+
+                                    if (!value) {
+                                        alert('Please enter the VALO UPI ID.');
+                                        return;
+                                    }
+
+                                    // Basic UPI ID validation: handle@provider
+                                    if (!/^[^\s@]+@[^\s@]+$/.test(value)) {
+                                        alert('Please enter a valid UPI ID, for example hotelvalo@upi.');
+                                        return;
+                                    }
+
+                                    const { error } = await supabase
+                                        .from('app_settings')
+                                        .update({ upi_id: value })
+                                        .eq('id', 1);
+
+                                    if (error) {
+                                        alert('Error saving UPI ID to database: ' + error.message);
+                                        return;
+                                    }
+
+                                    setValoUpiId(value);
+                                    alert('VALO UPI ID saved to Database successfully!');
+                                }} className="flex flex-col sm:flex-row gap-3 max-w-xl">
+                                    <input
+                                        name="upiId"
+                                        type="text"
+                                        value={valoUpiId}
+                                        onChange={e => setValoUpiId(e.target.value.trim())}
+                                        placeholder="hotelvalo@upi"
+                                        autoComplete="off"
+                                        required
+                                        className="flex-1 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-green-500 outline-none transition"
+                                    />
+                                    <button type="submit" className="bg-green-500 hover:bg-green-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg shadow-green-500/20">Save UPI ID</button>
+                                </form>
+                                <div className="mt-3 text-xs text-gray-500">Current QR destination: <span className="text-green-400 font-mono">{valoUpiId || 'Not configured'}</span></div>
+                            </div>
 
                             <div className="bg-slate-800 p-6 rounded-xl border border-white/10 shadow-lg border-l-4 border-l-blue-500">
                                 <h3 className="text-xl font-bold mb-2 text-white">Push Notifications</h3>
