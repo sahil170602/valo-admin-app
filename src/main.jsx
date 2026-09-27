@@ -8,3 +8,21 @@ createRoot(document.getElementById('root')).render(
     <App />
   </StrictMode>,
 )
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/sw.js')
+      .then((registration) => {
+        console.log(
+          'VALO Service Worker registered:',
+          registration.scope
+        );
+      })
+      .catch((error) => {
+        console.error(
+          'VALO Service Worker registration failed:',
+          error
+        );
+      });
+  });
+}

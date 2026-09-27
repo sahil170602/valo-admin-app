@@ -7,6 +7,21 @@ import OneSignal from '@onesignal/capacitor-plugin';
 import { Filesystem } from '@capacitor/filesystem';
 import RoomManagement from './RoomManagement';
 import { LocalNotifications } from '@capacitor/local-notifications';
+import {
+    getOfflineCache,
+    setOfflineCache,
+    queueOfflineRequest,
+    getOfflineQueueCount,
+    getOfflineQueue,
+    getOfflineMeta,
+    setOfflineMeta,
+    removeOfflineQueueItem,
+    updateOfflineQueueItem,
+    isBrowserOffline,
+    isLikelyNetworkError,
+    installOfflineSupabaseFetch,
+    syncOfflineSupabaseQueue
+} from './offlineSupabase';
 
 // ============================================================
 // VALO NOTIFICATION + PWA CONFIGURATION
@@ -134,7 +149,9 @@ const loadOneSignalWebSdk = () => {
 
 const ensurePwaHead = () => {
     if (typeof document === 'undefined') return;
-    if (!isValoProductionWeb()) return;
+    const hostname = window.location.hostname;
+    const isLocalWeb = hostname === 'localhost' || hostname === '127.0.0.1';
+    if (!isValoProductionWeb() && !isLocalWeb) return;
 
     if (!document.querySelector('link[rel="manifest"]')) {
         const link = document.createElement('link');
@@ -170,7 +187,9 @@ const ensurePwaHead = () => {
 const registerValoPwaWorker = async () => {
     if (typeof navigator === 'undefined') return null;
     if (!('serviceWorker' in navigator)) return null;
-    if (!isValoProductionWeb()) return null;
+    const hostname = window.location.hostname;
+    const isLocalWeb = hostname === 'localhost' || hostname === '127.0.0.1';
+    if (!isValoProductionWeb() && !isLocalWeb) return null;
 
     try {
         // Firebase/Vite SPA fallback can return index.html for a missing
@@ -356,6 +375,7 @@ const requestValoNotificationPermission = async () => {
 };
 
 const sendRemoteAdminNotification = async (title, body, data = {}) => {
+    if (isBrowserOffline()) return;
     try {
         const { error } = await supabase.functions.invoke('send-admin-notification', { body: { title, body, data } });
         if (error) console.warn('Remote admin notification skipped:', error.message || error);
@@ -372,13 +392,23 @@ const sendAdminNotification = async (title, body, data = {}) => {
 
 export default function AdminPanel() {
     const [isLoading, setIsLoading] = useState(true);
+    // Persist the authenticated operator across app restarts.
+    // localStorage survives closing/reopening the APK, but is cleared when
+    // the app is uninstalled. The explicit Lock App action removes it.
     const [operator, setOperator] = useState(() => {
-        try { const raw = sessionStorage.getItem('valo_operator'); return raw ? JSON.parse(raw) : null; }
-        catch { return null; }
+        try {
+            const raw = localStorage.getItem('valo_operator');
+            return raw ? JSON.parse(raw) : null;
+        } catch {
+            return null;
+        }
     });
     const [showGate, setShowGate] = useState(() => {
-        try { return !sessionStorage.getItem('valo_operator'); }
-        catch { return true; }
+        try {
+            return !localStorage.getItem('valo_operator');
+        } catch {
+            return true;
+        }
     });
     const [appMode, setAppMode] = useState(() => localStorage.getItem('valo_app_mode') || 'food');
     const toggleMode = () => {
@@ -392,20 +422,32 @@ export default function AdminPanel() {
             name: String(operatorInfo?.name || 'Admin').trim() || 'Admin',
             role: operatorInfo?.role === 'staff' ? 'staff' : 'admin'
         };
-        sessionStorage.setItem('valo_operator', JSON.stringify(normalized));
+        // Keep the operator unlocked until the user explicitly taps Lock App
+        // or the application is uninstalled.
+        localStorage.setItem('valo_operator', JSON.stringify(normalized));
+        localStorage.setItem('valo_unlocked', 'true');
         setOperator(normalized);
         setShowGate(false);
     };
-    const handleSwitchOperator = () => {
+    const handleLockApp = () => {
+        // Explicit lock: clear the persistent access state so the PIN is
+        // required the next time the app is opened.
+        localStorage.removeItem('valo_operator');
+        localStorage.removeItem('valo_unlocked');
         sessionStorage.removeItem('valo_operator');
         setOperator(null);
         setShowGate(true);
     };
+    useEffect(() => {
+        // Install the offline Supabase GET cache before the login gate renders.
+        // This lets AdminLogin/Staff login read cached settings while offline.
+        installOfflineSupabaseFetch(supabase);
+    }, []);
     useEffect(() => { const timer = setTimeout(() => setIsLoading(false), 3000); return () => clearTimeout(timer); }, []);
     if (isLoading) return <SplashScreen />;
     if (showGate || !operator) return <AdminLogin onAccess={handleAccess} />;
     return appMode === 'food' ? (
-        <AdminDashboard appMode={appMode} toggleMode={toggleMode} operator={operator} onSwitchOperator={handleSwitchOperator} />
+        <AdminDashboard appMode={appMode} toggleMode={toggleMode} operator={operator} onLockApp={handleLockApp} />
     ) : (
         <RoomManagement appMode={appMode} toggleMode={toggleMode} />
     );
@@ -507,7 +549,7 @@ function AdminLogin({ onAccess }) {
     );
 }
 
-function AdminDashboard({ appMode, toggleMode, operator, onSwitchOperator }) {
+function AdminDashboard({ appMode, toggleMode, operator, onLockApp }) {
     const [activeTab, setActiveTab] = useState('orders');
      const [opsTab, setOpsTab] = useState('staff');
     
@@ -539,10 +581,12 @@ function AdminDashboard({ appMode, toggleMode, operator, onSwitchOperator }) {
     };
 
     const handleLockApp = () => {
-        localStorage.setItem('valo_unlocked', 'false'); // Lock it instantly
+        // Parent clears the persistent app access and returns to the PIN gate.
         setIsUnlocked(false);
-        setActiveTab('orders'); // Safely kick them back to orders
-        alert("App Locked! Admin areas are now secured.");
+        setActiveTab('orders');
+        if (typeof onLockApp === 'function') {
+            onLockApp();
+        }
     };
     
     const [appName, setAppName] = useState(() => localStorage.getItem('valo_app_name') || 'VALO');
@@ -583,6 +627,8 @@ function AdminDashboard({ appMode, toggleMode, operator, onSwitchOperator }) {
     const [selectedMenuId, setSelectedMenuId] = useState(null);
     const [selectedInvId, setSelectedInvId] = useState(null);
     const [billBarcode, setBillBarcode] = useState('');
+    const [creatingBill, setCreatingBill] = useState(false);
+    const createBillRequestRef = useRef(null);
     
     // Live Order Custom Item Form
     const [addingItemTo, setAddingItemTo] = useState(null);
@@ -659,9 +705,17 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
 
     // --- OPERATOR / AUDIT TRAIL ---
     const currentOperator = operator || { id: null, name: 'Admin', role: 'admin' };
+
     const [installPromptEvent, setInstallPromptEvent] = useState(null);
     const [showInstallHelp, setShowInstallHelp] = useState(false);
     const [appNotifications, setAppNotifications] = useState([]);
+    const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine !== false);
+    const [pendingSyncCount, setPendingSyncCount] = useState(0);
+    const [offlineSyncing, setOfflineSyncing] = useState(false);
+    const [offlineSyncStatus, setOfflineSyncStatus] = useState('online');
+    const [syncProgress, setSyncProgress] = useState({ total: 0, remaining: 0 });
+    const [syncError, setSyncError] = useState('');
+    const [offlinePopup, setOfflinePopup] = useState(false);
 
     const pushAppNotification = (title, body, type = 'info') => {
         const id = `${Date.now()}_${Math.random()}`;
@@ -673,6 +727,279 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
         pushAppNotification(title, body, type);
         await sendAdminNotification(title, body, data);
     };
+
+
+    const processCustomOfflineQueue = async (item) => {
+        const payload = item?.payload || {};
+        try {
+            if (item.type === 'CREATE_ORDER') {
+                const orderPayload = payload.orderPayload || {};
+                let existing = null;
+                if (orderPayload.client_request_id) {
+                    const lookup = await supabase
+                        .from('orders')
+                        .select('id')
+                        .eq('client_request_id', orderPayload.client_request_id)
+                        .maybeSingle();
+                    if (lookup?.error && isLikelyNetworkError(lookup.error)) return false;
+                    existing = lookup?.data || null;
+                }
+
+                let created = existing;
+                if (!created) {
+                    const result = await supabase
+                        .from('orders')
+                        .insert([orderPayload])
+                        .select('id, client_request_id')
+                        .single();
+                    if (result.error) {
+                        if (isLikelyNetworkError(result.error)) return false;
+                        console.error('Offline order sync failed:', result.error);
+                        return false;
+                    }
+                    created = result.data;
+                }
+
+                if (payload.localId != null && created?.id != null) {
+                    await setOfflineMeta(`order-map:${payload.localId}`, created.id);
+                }
+                return true;
+            }
+
+            if (item.type === 'UPDATE_ORDER') {
+                let targetId = payload.id;
+                if (Number(targetId) < 0) {
+                    targetId = await getOfflineMeta(`order-map:${targetId}`);
+                    if (!targetId) return false;
+                }
+                const result = await supabase
+                    .from('orders')
+                    .update(payload.dbPayload || {})
+                    .eq('id', targetId);
+                if (result.error) return isLikelyNetworkError(result.error) ? false : false;
+                return true;
+            }
+
+            if (item.type === 'ORDER_ACTIVITY') {
+                let targetId = payload.orderId;
+                if (Number(targetId) < 0) {
+                    targetId = await getOfflineMeta(`order-map:${targetId}`);
+                    if (!targetId) return false;
+                }
+                const result = await supabase.from('order_activity_log').insert([{
+                    order_id: targetId,
+                    operator_id: payload.operatorId ?? null,
+                    operator_name: payload.operatorName || 'Unknown',
+                    operator_role: payload.operatorRole || 'staff',
+                    action: payload.action,
+                    description: payload.description || '',
+                    created_at: payload.createdAt || new Date().toISOString()
+                }]);
+                if (result.error) return false;
+                return true;
+            }
+
+            if (item.type === 'INVENTORY_RPC') {
+                const result = await supabase.rpc('adjust_inventory_stock', {
+                    p_inventory_id: payload.inventoryId,
+                    p_delta: Number(payload.delta)
+                });
+                if (result.error) return false;
+                return true;
+            }
+
+            if (item.type === 'RECIPE_RPC') {
+                const result = await supabase.rpc('adjust_menu_recipe_stock', {
+                    p_menu_item_id: Number(payload.menuItemId),
+                    p_quantity_delta: Number(payload.quantityDelta)
+                });
+                if (result.error) return false;
+                return true;
+            }
+        } catch (error) {
+            console.warn('VALO custom offline sync paused:', error);
+            return false;
+        }
+        return false;
+    };
+
+    // ============================================================
+    // FULL OFFLINE-FIRST CONNECTION / SYNC CONTROLLER
+    // - Keeps the whole dashboard usable while disconnected.
+    // - Shows a persistent Offline Mode banner.
+    // - Shows a blocking sync loader when connectivity returns and
+    //   there are queued mutations waiting for Supabase.
+    // - Never clears a queue item until its operation succeeds.
+    // ============================================================
+    useEffect(() => {
+        let cancelled = false;
+        let progressTimer = null;
+        let syncing = false;
+
+        const refreshQueue = async () => {
+            const count = await getOfflineQueueCount();
+            if (!cancelled) setPendingSyncCount(count);
+            return count;
+        };
+
+        const pollProgress = () => {
+            if (progressTimer) window.clearInterval(progressTimer);
+            progressTimer = window.setInterval(async () => {
+                const remaining = await getOfflineQueueCount();
+                if (cancelled) return;
+                setPendingSyncCount(remaining);
+                setSyncProgress(prev => ({ ...prev, remaining }));
+            }, 250);
+        };
+
+        const stopProgress = () => {
+            if (progressTimer) window.clearInterval(progressTimer);
+            progressTimer = null;
+        };
+
+        const runWithTimeout = async (promise, timeoutMs = 7000) => {
+            let timer;
+            try {
+                return await Promise.race([
+                    promise,
+                    new Promise(resolve => {
+                        timer = window.setTimeout(() => resolve({ __timedOut: true }), timeoutMs);
+                    })
+                ]);
+            } finally {
+                if (timer) window.clearTimeout(timer);
+            }
+        };
+
+        const syncNow = async () => {
+            if (cancelled || syncing || isBrowserOffline()) return;
+            syncing = true;
+            setSyncError('');
+
+            try {
+                const before = await refreshQueue();
+                if (!before) {
+                    if (!cancelled) {
+                        setOfflineSyncing(false);
+                        setOfflineSyncStatus('online');
+                        setSyncProgress({ total: 0, remaining: 0 });
+                    }
+                    return;
+                }
+
+                setOfflineSyncing(true);
+                setOfflineSyncStatus('syncing');
+                setSyncProgress({ total: before, remaining: before });
+                pollProgress();
+
+                await syncOfflineSupabaseQueue(processCustomOfflineQueue);
+
+                // Refresh local React state, but never let a slow Supabase read
+                // keep the blocking sync overlay stuck on screen.
+                if (typeof fetchData === 'function' && !isBrowserOffline()) {
+                    const refreshResult = await runWithTimeout(fetchData(), 7000);
+                    if (refreshResult?.__timedOut) {
+                        console.warn('VALO sync refresh timed out; local synced state will remain visible.');
+                    }
+                }
+
+                const remaining = await refreshQueue();
+                if (!cancelled) {
+                    setSyncProgress({ total: before, remaining });
+                    setOfflineSyncing(false);
+                    if (remaining === 0) {
+                        setOfflineSyncStatus('synced');
+                        window.setTimeout(() => {
+                            if (!cancelled) {
+                                setOfflineSyncStatus('online');
+                                setSyncProgress({ total: 0, remaining: 0 });
+                            }
+                        }, 1800);
+                    } else {
+                        setOfflineSyncStatus(isBrowserOffline() ? 'offline' : 'error');
+                        setSyncError(`${remaining} change${remaining === 1 ? '' : 's'} still waiting to sync.`);
+                    }
+                }
+            } catch (error) {
+                const remaining = await refreshQueue();
+                if (!cancelled) {
+                    setOfflineSyncing(false);
+                    setOfflineSyncStatus(isBrowserOffline() ? 'offline' : 'error');
+                    setSyncError(error?.message || `Unable to sync ${remaining} pending change${remaining === 1 ? '' : 's'}.`);
+                }
+            } finally {
+                stopProgress();
+                if (!cancelled) setOfflineSyncing(false);
+                syncing = false;
+            }
+        };
+
+        const handleOffline = async () => {
+            if (cancelled) return;
+            setIsOnline(false);
+            setOfflineSyncing(false);
+            setOfflineSyncStatus('offline');
+            setSyncError('');
+            const count = await refreshQueue();
+            setOfflinePopup(true);
+            window.setTimeout(() => { if (!cancelled) setOfflinePopup(false); }, 4500);
+            pushAppNotification(
+                '🔴 Offline Mode',
+                count > 0
+                    ? `Internet connection lost. VALO is working locally. ${count} change${count === 1 ? '' : 's'} will sync automatically.`
+                    : 'Internet connection lost. VALO is working locally. New changes will sync automatically.',
+                'warning'
+            );
+        };
+
+        const handleOnline = async () => {
+            if (cancelled) return;
+            setIsOnline(true);
+            setSyncError('');
+            const count = await refreshQueue();
+            if (count > 0) {
+                pushAppNotification('🟠 Internet Restored', `Syncing ${count} pending change${count === 1 ? '' : 's'} now...`, 'info');
+                await syncNow();
+            } else {
+                setOfflineSyncStatus('online');
+            }
+        };
+
+        installOfflineSupabaseFetch(supabase);
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+
+        (async () => {
+            const count = await refreshQueue();
+            if (cancelled) return;
+            if (isBrowserOffline()) {
+                setIsOnline(false);
+                setOfflineSyncStatus('offline');
+                return;
+            }
+            setIsOnline(true);
+            if (count > 0) await syncNow();
+            else setOfflineSyncStatus('online');
+        })();
+
+        // navigator.onLine can briefly report online before the connection is
+        // actually usable. Retry pending work quietly until it is confirmed.
+        const retryTimer = window.setInterval(async () => {
+            if (!cancelled && !isBrowserOffline() && !syncing) {
+                const count = await refreshQueue();
+                if (count > 0) await syncNow();
+            }
+        }, 5000);
+
+        return () => {
+            window.clearInterval(retryTimer);
+            cancelled = true;
+            stopProgress();
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+        };
+    }, []);
+
     const [orderActivityModal, setOrderActivityModal] = useState({ open: false, orderId: null, orderLabel: '', rows: [], loading: false });
     const [staffAccounts, setStaffAccounts] = useState([]);
     const [staffAccountForm, setStaffAccountForm] = useState({ id: null, name: '', pin: '' });
@@ -739,24 +1066,52 @@ const openWhatsAppReport = (message) => {
 const adjustInventoryStock = async (inventoryId, delta) => {
     if (!inventoryId || !delta) return null;
 
-    const { data, error } = await supabase.rpc('adjust_inventory_stock', {
-        p_inventory_id: inventoryId,
-        p_delta: Number(delta)
-    });
+    const applyLocal = async () => {
+        const current = inventoryItems.find(item => Number(item.id) === Number(inventoryId));
+        if (!current) return null;
+        const newStock = Number(current.stock || 0) + Number(delta);
+        if (newStock < 0) {
+            alert('Not enough inventory stock.');
+            return null;
+        }
+        setInventoryItems(prev => prev.map(item =>
+            Number(item.id) === Number(inventoryId) ? { ...item, stock: newStock } : item
+        ));
+        await queueOfflineRequest({
+            kind: 'valo-custom',
+            type: 'INVENTORY_RPC',
+            payload: { inventoryId: Number(inventoryId), delta: Number(delta) }
+        });
+        setPendingSyncCount(count => count + 1);
+        return newStock;
+    };
 
-    if (error) {
+    if (isBrowserOffline()) return applyLocal();
+
+    try {
+        const { data, error } = await supabase.rpc('adjust_inventory_stock', {
+            p_inventory_id: inventoryId,
+            p_delta: Number(delta)
+        });
+
+        if (error) {
+            if (isLikelyNetworkError(error)) return applyLocal();
+            console.error('Inventory adjustment error:', error);
+            alert(error.message || 'Unable to update inventory stock.');
+            return null;
+        }
+
+        const newStock = Number(data);
+        setInventoryItems(prev => prev.map(item =>
+            item.id === inventoryId ? { ...item, stock: newStock } : item
+        ));
+        return newStock;
+    } catch (error) {
+        if (isLikelyNetworkError(error)) return applyLocal();
         console.error('Inventory adjustment error:', error);
         alert(error.message || 'Unable to update inventory stock.');
         return null;
     }
-
-    const newStock = Number(data);
-
-    setInventoryItems(prev => prev.map(item =>
-        item.id === inventoryId ? { ...item, stock: newStock } : item
-    ));
-
-    return newStock;
 };
 
 // Serialize live-order mutations per order so rapid + / - clicks cannot
@@ -782,16 +1137,53 @@ const withOrderMutationLock = async (orderId, operation) => {
 // ============================================================
 const logOrderActivity = async (orderId, action, description) => {
     if (!orderId) return;
-    const { error } = await supabase.from('order_activity_log').insert([{
-        order_id: orderId,
-        operator_id: currentOperator.id,
-        operator_name: currentOperator.name || 'Unknown',
-        operator_role: currentOperator.role || 'staff',
-        action,
-        description: description || '',
-        created_at: new Date().toISOString()
-    }]);
-    if (error) console.error('Order audit log error:', error);
+    if (isBrowserOffline() || Number(orderId) < 0) {
+        await queueOfflineRequest({
+            kind: 'valo-custom',
+            type: 'ORDER_ACTIVITY',
+            payload: {
+                orderId,
+                operatorId: currentOperator.id,
+                operatorName: currentOperator.name || 'Unknown',
+                operatorRole: currentOperator.role || 'staff',
+                action,
+                description: description || '',
+                createdAt: new Date().toISOString()
+            }
+        });
+        setPendingSyncCount(count => count + 1);
+        return;
+    }
+    try {
+        const { error } = await supabase.from('order_activity_log').insert([{
+            order_id: orderId,
+            operator_id: currentOperator.id,
+            operator_name: currentOperator.name || 'Unknown',
+            operator_role: currentOperator.role || 'staff',
+            action,
+            description: description || '',
+            created_at: new Date().toISOString()
+        }]);
+        if (error && isLikelyNetworkError(error)) {
+            await queueOfflineRequest({
+                kind: 'valo-custom',
+                type: 'ORDER_ACTIVITY',
+                payload: { orderId, operatorId: currentOperator.id, operatorName: currentOperator.name || 'Unknown', operatorRole: currentOperator.role || 'staff', action, description: description || '', createdAt: new Date().toISOString() }
+            });
+            setPendingSyncCount(count => count + 1);
+        } else if (error) {
+            console.error('Order audit log error:', error);
+        }
+    } catch (error) {
+        if (isLikelyNetworkError(error)) {
+            await queueOfflineRequest({
+                kind: 'valo-custom',
+                type: 'ORDER_ACTIVITY',
+                payload: { orderId, operatorId: currentOperator.id, operatorName: currentOperator.name || 'Unknown', operatorRole: currentOperator.role || 'staff', action, description: description || '', createdAt: new Date().toISOString() }
+            });
+            setPendingSyncCount(count => count + 1);
+        } else console.error('Order audit log error:', error);
+    }
 };
 
 const openOrderActivity = async (order) => {
@@ -1589,19 +1981,59 @@ useEffect(() => {
         const recipe = menuRecipes[menuItemId] || [];
         if (!recipe.length) return true;
 
-        const { error } = await supabase.rpc('adjust_menu_recipe_stock', {
-            p_menu_item_id: Number(menuItemId),
-            p_quantity_delta: Number(quantityDelta)
-        });
+        const applyLocal = async () => {
+            const changes = recipe.map(row => ({
+                inventoryId: Number(row.inventory_item_id),
+                delta: -Number(row.quantity || 0) * Number(quantityDelta)
+            })).filter(row => row.inventoryId && row.delta);
 
-        if (error) {
+            const currentMap = new Map(inventoryItems.map(item => [Number(item.id), Number(item.stock || 0)]));
+            for (const change of changes) {
+                const next = Number(currentMap.get(change.inventoryId) || 0) + change.delta;
+                if (next < 0) {
+                    alert('Recipe inventory is insufficient.');
+                    return false;
+                }
+                currentMap.set(change.inventoryId, next);
+            }
+
+            setInventoryItems(prev => prev.map(item => {
+                const next = currentMap.get(Number(item.id));
+                return next === undefined ? item : { ...item, stock: next };
+            }));
+
+            await queueOfflineRequest({
+                kind: 'valo-custom',
+                type: 'RECIPE_RPC',
+                payload: { menuItemId: Number(menuItemId), quantityDelta: Number(quantityDelta) }
+            });
+            setPendingSyncCount(count => count + 1);
+            return true;
+        };
+
+        if (isBrowserOffline()) return applyLocal();
+
+        try {
+            const { error } = await supabase.rpc('adjust_menu_recipe_stock', {
+                p_menu_item_id: Number(menuItemId),
+                p_quantity_delta: Number(quantityDelta)
+            });
+
+            if (error) {
+                if (isLikelyNetworkError(error)) return applyLocal();
+                console.error('Recipe inventory adjustment error:', error);
+                alert(error.message || 'Unable to update recipe inventory stock.');
+                return false;
+            }
+
+            await fetchInventory();
+            return true;
+        } catch (error) {
+            if (isLikelyNetworkError(error)) return applyLocal();
             console.error('Recipe inventory adjustment error:', error);
             alert(error.message || 'Unable to update recipe inventory stock.');
             return false;
         }
-
-        await fetchInventory();
-        return true;
     };
 
     const getOrderMenuRecipeAdjustments = (items) =>
@@ -2100,7 +2532,44 @@ const handleSaveMissingItem = async (e) => {
     const updateOrder = async (id, updates) => {
         const { skipRecipeRefund = false, ...cleanUpdates } = updates || {};
         updates = cleanUpdates;
-        const { data: current, error: fetchError } = await supabase.from('orders').select('order_details, total, status').eq('id', id).single();
+        let current = null;
+        let fetchError = null;
+        if (isBrowserOffline() || Number(id) < 0) {
+            const localOrder = orders.find(order => String(order.id) === String(id));
+            const localOrderDetails = localOrder
+                ? (localOrder.items !== undefined || localOrder.customItems !== undefined
+                    ? localOrder
+                    : (localOrder.order_details || localOrder))
+                : null;
+            if (localOrder) {
+                current = {
+                    order_details: localOrderDetails,
+                    total: localOrder.total,
+                    status: localOrder.status
+                };
+            } else {
+                fetchError = new Error('Order is not available in the offline cache.');
+            }
+        } else {
+            try {
+                const result = await supabase.from('orders').select('order_details, total, status').eq('id', id).single();
+                current = result.data;
+                fetchError = result.error;
+                if (fetchError && isLikelyNetworkError(fetchError)) {
+                    const localOrder = orders.find(order => String(order.id) === String(id));
+                    if (localOrder) {
+                        current = { order_details: (localOrder.items !== undefined || localOrder.customItems !== undefined) ? localOrder : (localOrder.order_details || localOrder), total: localOrder.total, status: localOrder.status };
+                        fetchError = null;
+                    }
+                }
+            } catch (error) {
+                if (isLikelyNetworkError(error)) {
+                    const localOrder = orders.find(order => String(order.id) === String(id));
+                    if (localOrder) current = { order_details: (localOrder.items !== undefined || localOrder.customItems !== undefined) ? localOrder : (localOrder.order_details || localOrder), total: localOrder.total, status: localOrder.status };
+                    else fetchError = error;
+                } else throw error;
+            }
+        }
         if (fetchError) return { error: fetchError };
         if (!current) return { error: new Error('Order not found.') };
 
@@ -2184,7 +2653,39 @@ const handleSaveMissingItem = async (e) => {
         };
         if (updates.total !== undefined) dbPayload.total = updates.total;
 
-        const { error } = await supabase.from('orders').update(dbPayload).eq('id', id);
+        let error = null;
+        if (isBrowserOffline() || Number(id) < 0) {
+            await queueOfflineRequest({
+                kind: 'valo-custom',
+                type: 'UPDATE_ORDER',
+                payload: { id, dbPayload }
+            });
+            setPendingSyncCount(count => count + 1);
+        } else {
+            try {
+                const result = await supabase.from('orders').update(dbPayload).eq('id', id);
+                error = result.error;
+                if (error && isLikelyNetworkError(error)) {
+                    await queueOfflineRequest({
+                        kind: 'valo-custom',
+                        type: 'UPDATE_ORDER',
+                        payload: { id, dbPayload }
+                    });
+                    setPendingSyncCount(count => count + 1);
+                    error = null;
+                }
+            } catch (networkError) {
+                if (isLikelyNetworkError(networkError)) {
+                    await queueOfflineRequest({
+                        kind: 'valo-custom',
+                        type: 'UPDATE_ORDER',
+                        payload: { id, dbPayload }
+                    });
+                    setPendingSyncCount(count => count + 1);
+                    error = null;
+                } else throw networkError;
+            }
+        }
         if (error) return { error };
 
         if (added.length) {
@@ -2231,7 +2732,16 @@ const handleSaveMissingItem = async (e) => {
             await logOrderActivity(id, 'ORDER_UPDATED', `Order #${id} details updated.`);
         }
 
-        setOrders(prev => prev.map(order => order.id === id ? { ...order, ...newDetails, id, status: dbPayload.status, total: dbPayload.total !== undefined ? dbPayload.total : current.total } : order));
+        setOrders(prev => prev.map(order => order.id === id ? {
+            ...order,
+            ...newDetails,
+            id,
+            status: dbPayload.status,
+            total: dbPayload.total !== undefined ? dbPayload.total : current.total,
+            // Keep the nested snapshot in sync with the flattened live order.
+            // Offline add/remove operations read this snapshot on their next click.
+            order_details: newDetails
+        } : order));
         return { error: null };
     };
 
@@ -2874,8 +3384,36 @@ const handleSaveMissingItem = async (e) => {
     };
 
     const removeLiveOrderItem = async (orderId, itemKey, isCustom) => {
-        const { data: dbOrder } = await supabase.from('orders').select('order_details').eq('id', orderId).single();
-        const details = dbOrder?.order_details || {};
+        // Offline: never call Supabase just to open the confirmation dialog.
+        // The already-loaded local order is the source of truth until sync.
+        let details = null;
+        const localOrder = orders.find(order => String(order.id) === String(orderId));
+
+        if (isBrowserOffline() || Number(orderId) < 0) {
+            details = localOrder?.order_details || localOrder || {};
+        } else {
+            try {
+                const { data, error } = await supabase
+                    .from('orders')
+                    .select('order_details')
+                    .eq('id', orderId)
+                    .single();
+
+                if (!error && data) {
+                    details = data.order_details || {};
+                } else if (isLikelyNetworkError(error) && localOrder) {
+                    details = localOrder.order_details || localOrder || {};
+                }
+            } catch (error) {
+                if (isLikelyNetworkError(error) && localOrder) {
+                    details = localOrder.order_details || localOrder || {};
+                } else {
+                    console.error('Remove item order load error:', error);
+                }
+            }
+        }
+
+        details = details || {};
         let itemName = 'this item';
         if (isCustom) {
             itemName = (details.customItems || []).find(c => c.id === itemKey)?.name || 'this item';
@@ -2883,6 +3421,7 @@ const handleSaveMissingItem = async (e) => {
             const menuId = String(itemKey).replace('menu_', '');
             itemName = menuItems.find(i => Number(i.id) === Number(menuId))?.name || 'this item';
         }
+
         setRemoveItemConfirm({
             open: true,
             itemName,
@@ -2892,11 +3431,65 @@ const handleSaveMissingItem = async (e) => {
 
     const executeRemoveLiveOrderItem = async (orderId, itemKey, isCustom, made = false) => {
         return withOrderMutationLock(orderId, async () => {
-            const { data: dbOrder, error: fetchError } = await supabase
-                .from('orders')
-                .select('*')
-                .eq('id', orderId)
-                .single();
+            let dbOrder = null;
+            let fetchError = null;
+            const localOrder = orders.find(order => String(order.id) === String(orderId));
+            // The live order state is the source of truth while offline.
+            // Prefer its flattened items/customItems because order_details can
+            // be stale in older cached records.
+            const localOrderDetails = localOrder
+                ? (localOrder.items !== undefined || localOrder.customItems !== undefined
+                    ? localOrder
+                    : (localOrder.order_details || localOrder))
+                : null;
+
+            if (isBrowserOffline() || Number(orderId) < 0) {
+                if (localOrder) {
+                    dbOrder = {
+                        id: localOrder.id,
+                        status: localOrder.status,
+                        table_no: localOrder.tableNo || localOrder.table_no || 'Counter',
+                        total: localOrder.total,
+                        order_details: localOrderDetails
+                    };
+                } else {
+                    fetchError = new Error('Order is not available in the offline cache.');
+                }
+            } else {
+                try {
+                    const result = await supabase
+                        .from('orders')
+                        .select('*')
+                        .eq('id', orderId)
+                        .single();
+                    dbOrder = result.data;
+                    fetchError = result.error;
+
+                    if (fetchError && isLikelyNetworkError(fetchError) && localOrder) {
+                        dbOrder = {
+                            id: localOrder.id,
+                            status: localOrder.status,
+                            table_no: localOrder.tableNo || localOrder.table_no || 'Counter',
+                            total: localOrder.total,
+                            order_details: localOrderDetails
+                        };
+                        fetchError = null;
+                    }
+                } catch (error) {
+                    if (isLikelyNetworkError(error) && localOrder) {
+                        dbOrder = {
+                            id: localOrder.id,
+                            status: localOrder.status,
+                            table_no: localOrder.tableNo || localOrder.table_no || 'Counter',
+                            total: localOrder.total,
+                            order_details: localOrderDetails
+                        };
+                        fetchError = null;
+                    } else {
+                        fetchError = error;
+                    }
+                }
+            }
 
             if (fetchError || !dbOrder) {
                 alert(fetchError?.message || 'Unable to load the latest order.');
@@ -2983,11 +3576,61 @@ const handleSaveMissingItem = async (e) => {
 
     const handleAddCustomItem = async (orderId) => {
         return withOrderMutationLock(orderId, async () => {
-            const { data: dbOrder, error: fetchError } = await supabase
-                .from('orders')
-                .select('*')
-                .eq('id', orderId)
-                .single();
+            // Offline: use the order already loaded into React/IndexedDB cache.
+            // Do not perform a Supabase read before adding an item.
+            let dbOrder = null;
+            let fetchError = null;
+            const localOrder = orders.find(order => String(order.id) === String(orderId));
+
+            if (isBrowserOffline() || Number(orderId) < 0) {
+                if (localOrder) {
+                    dbOrder = {
+                        id: localOrder.id,
+                        status: localOrder.status,
+                        table_no: localOrder.tableNo || localOrder.table_no || 'Counter',
+                        total: localOrder.total,
+                        order_details: localOrder.order_details || localOrder
+                    };
+                } else {
+                    fetchError = new Error('Order is not available in the offline cache.');
+                }
+            } else {
+                try {
+                    const result = await supabase
+                        .from('orders')
+                        .select('*')
+                        .eq('id', orderId)
+                        .single();
+                    dbOrder = result.data;
+                    fetchError = result.error;
+
+                    // If the connection disappeared during the read, continue
+                    // with the local copy instead of showing "Failed to fetch".
+                    if (fetchError && isLikelyNetworkError(fetchError) && localOrder) {
+                        dbOrder = {
+                            id: localOrder.id,
+                            status: localOrder.status,
+                            table_no: localOrder.tableNo || localOrder.table_no || 'Counter',
+                            total: localOrder.total,
+                            order_details: localOrderDetails
+                        };
+                        fetchError = null;
+                    }
+                } catch (error) {
+                    if (isLikelyNetworkError(error) && localOrder) {
+                        dbOrder = {
+                            id: localOrder.id,
+                            status: localOrder.status,
+                            table_no: localOrder.tableNo || localOrder.table_no || 'Counter',
+                            total: localOrder.total,
+                            order_details: localOrder.order_details || localOrder
+                        };
+                        fetchError = null;
+                    } else {
+                        fetchError = error;
+                    }
+                }
+            }
 
             if (fetchError || !dbOrder) {
                 alert(fetchError?.message || 'Unable to load the latest order.');
@@ -3124,7 +3767,14 @@ const handleSaveMissingItem = async (e) => {
         ));
     };
 
-const handleCreateBill = async () => {
+const handleCreateBillOnline = async () => {
+            const clientRequestId = createBillRequestRef.current || (
+                typeof crypto !== 'undefined' && crypto.randomUUID
+                    ? crypto.randomUUID()
+                    : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+            );
+            createBillRequestRef.current = clientRequestId;
+
             const regularItems = {};
         const customItems = [];
         let addedTotal = 0;
@@ -3185,6 +3835,70 @@ const handleCreateBill = async () => {
             deductedRecipes.push({ menuId: Number(menuId), qty: amount });
         }
 
+        // OFFLINE-FIRST CREATE BILL
+        // Save the bill locally immediately. It is synced to Supabase when
+        // the connection returns. This path never waits for Supabase.
+        if (isBrowserOffline()) {
+            const localId = -Date.now();
+            const orderPayload = {
+                client_request_id: clientRequestId,
+                status: 'Ready',
+                table_no: billTableNo || 'Counter',
+                total: addedTotal,
+                customer_phone: billCustomerPhone || 'Walk-in',
+                item_names: generateItemNamesString(regularItems, customItems),
+                order_details: {
+                    created_by_name: currentOperator.name,
+                    created_by_id: currentOperator.id,
+                    created_by_role: currentOperator.role,
+                    last_updated_by_name: currentOperator.name,
+                    last_updated_by_id: currentOperator.id,
+                    last_updated_by_role: currentOperator.role,
+                    last_updated_at: new Date().toISOString(),
+                    date: getFormattedDate(),
+                    time: getFormattedTime(),
+                    timestamp: Date.now(),
+                    items: regularItems,
+                    customItems: customItems,
+                    paymentMethod: 'Cash',
+                    paymentStatus: 'Pending',
+                    customer: { name: billCustomerName || 'Walk-in', phone: billCustomerPhone || '' },
+                    prepTime: null
+                }
+            };
+
+            const localOrder = {
+                ...orderPayload.order_details,
+                order_details: orderPayload.order_details,
+                id: localId,
+                status: orderPayload.status,
+                tableNo: orderPayload.table_no,
+                total: orderPayload.total,
+                customer: orderPayload.order_details.customer,
+                client_request_id: clientRequestId
+            };
+
+            setOrders(prev => [localOrder, ...prev]);
+            await queueOfflineRequest({
+                kind: 'valo-custom',
+                type: 'CREATE_ORDER',
+                payload: { orderPayload, localId }
+            });
+            setPendingSyncCount(count => count + 1);
+
+            await logOrderActivity(localId, 'CREATED', `Order (offline) created by ${currentOperator.name}.`);
+            await notifyOrderEvent(
+                '📦 New Bill Created',
+                `Offline Order created by ${currentOperator.name} for Table: ${billTableNo || 'Counter'} (₹${addedTotal}).`,
+                { orderId: localId, action: 'CREATED', offline: true },
+                'success'
+            );
+
+            resetPOS();
+            setActiveTab('orders');
+            return;
+        }
+
         let existingOrder = orders.find(o => {
             const isActive = ['Received', 'Preparing', 'Ready'].includes(o.status);
             if (!isActive) return false;
@@ -3243,6 +3957,7 @@ const handleCreateBill = async () => {
             }
         } else {
             const orderPayload = {
+                client_request_id: clientRequestId,
                 status: 'Ready', 
                 table_no: billTableNo || 'Counter',
                 total: addedTotal,
@@ -3298,6 +4013,18 @@ const handleCreateBill = async () => {
                 setActiveTab('orders');
                 await Promise.all([fetchOrders(), fetchInventory()]);
             }
+        }
+    };
+
+    const handleCreateBill = async () => {
+        if (creatingBill) return;
+
+        setCreatingBill(true);
+        try {
+            await handleCreateBillOnline();
+        } finally {
+            setCreatingBill(false);
+            createBillRequestRef.current = null;
         }
     };
 
@@ -4844,6 +5571,58 @@ const handleCreateBill = async () => {
             ))}
         </div>
 
+        {offlinePopup && !isOnline && (
+            <div className="fixed inset-0 z-[850] flex items-center justify-center bg-black/45 backdrop-blur-[2px] p-4 pointer-events-none">
+                <div className="w-full max-w-sm rounded-3xl border border-red-400/30 bg-slate-900/95 shadow-2xl p-6 text-center animate-fade-in">
+                    <div className="mx-auto mb-3 w-14 h-14 rounded-2xl bg-red-500/15 flex items-center justify-center text-3xl">📡</div>
+                    <p className="text-xl font-black text-white">Offline Mode ON</p>
+                    <p className="text-sm text-gray-300 mt-2">Internet is unavailable. VALO is working locally.</p>
+                    <p className="text-xs text-gray-500 mt-2">Your changes are saved and will sync automatically when internet returns.</p>
+                </div>
+            </div>
+        )}
+
+       
+
+        {isOnline && offlineSyncStatus === 'syncing' && (
+            <div className="fixed top-0 left-0 right-0 z-[700] bg-orange-500 text-black px-4 py-3 shadow-2xl border-b border-orange-300/50">
+                <div className="max-w-7xl mx-auto flex items-center justify-center gap-3 text-sm font-black">
+                    <span className="inline-block w-4 h-4 rounded-full border-2 border-black/30 border-t-black animate-spin"></span>
+                    <span>🟠 SYNCING CHANGES...</span>
+                    <span>{syncProgress.remaining} pending</span>
+                </div>
+            </div>
+        )}
+
+        {isOnline && offlineSyncStatus === 'synced' && (
+            <div className="fixed top-0 left-0 right-0 z-[700] bg-green-500 text-black px-4 py-3 shadow-2xl border-b border-green-300/50">
+                <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-black">
+                    <span>🟢 SYNC COMPLETE</span>
+                    <span>All offline changes are synced.</span>
+                </div>
+            </div>
+        )}
+
+        {isOnline && offlineSyncStatus === 'error' && syncError && (
+            <div className="fixed top-0 left-0 right-0 z-[700] bg-red-500 text-white px-4 py-3 shadow-2xl border-b border-red-300/50">
+                <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm font-black">
+                    <span>⚠️ SYNC WAITING</span>
+                    <span>{syncError}</span>
+                </div>
+            </div>
+        )}
+
+        {offlineSyncing && (
+            <div className="fixed inset-0 z-[650] bg-black/35 backdrop-blur-[1px] pointer-events-auto flex items-center justify-center">
+                <div className="bg-slate-900 border border-orange-400/30 rounded-3xl shadow-2xl px-7 py-6 text-center min-w-[280px]">
+                    <div className="mx-auto mb-4 w-10 h-10 rounded-full border-4 border-white/10 border-t-orange-400 animate-spin"></div>
+                    <p className="text-white font-black text-lg">Syncing VALO...</p>
+                    <p className="text-gray-400 text-sm mt-1">{syncProgress.remaining} of {syncProgress.total} changes remaining</p>
+                    <p className="text-gray-500 text-xs mt-3">Please wait while offline changes are uploaded safely.</p>
+                </div>
+            </div>
+        )}
+
         {/* --- INSTALL VALO HELP --- */}
         {showInstallHelp && (
             <div className="fixed inset-0 z-[500] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" onClick={() => setShowInstallHelp(false)}>
@@ -5045,14 +5824,14 @@ const handleCreateBill = async () => {
                                         <div className="text-lg text-gray-400">Grand Total: <span className="text-white font-bold text-3xl ml-2">₹{billItemsList.reduce((sum, i) => sum + (i.price * i.qty), 0)}</span></div>
                                         <button
     onClick={handleCreateBill}
-    disabled={billItemsList.length === 0}
+    disabled={billItemsList.length === 0 || creatingBill}
     className={`w-full md:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${
-        billItemsList.length > 0
+        billItemsList.length > 0 && !creatingBill
             ? 'bg-green-500 text-black hover:bg-green-400 shadow-lg shadow-green-500/20'
             : 'bg-slate-700 text-gray-500 cursor-not-allowed'
     }`}
 >
-    Create
+    {creatingBill ? 'Creating...' : 'Create'}
 </button>
                                     </div>
                                 </div>
@@ -6699,8 +7478,12 @@ const handleCreateBill = async () => {
 
                 <div className="mt-4 grid grid-cols-2 gap-2">
                    
-                    <button type="button" onClick={handleLockApp} className="flex items-center justify-center gap-2 px-3 py-3 text-red-400 bg-red-500/10 hover:bg-red-500/20 rounded-xl transition-all text-xs font-bold">
-                        {isUnlocked ? '🔒 Lock App' : '🔒 Locked'}
+                    <button
+                        type="button"
+                        onClick={handleLockApp}
+                        className="flex items-center justify-center gap-2 px-3 py-3 text-red-400 bg-red-500/10 hover:bg-red-500/20 rounded-xl transition-all text-xs font-bold"
+                    >
+                        🔒 Lock App
                     </button>
                 </div>
             </aside> {/* <--- THIS CLOSING TAG FIXES THE ERROR */}
@@ -7736,18 +8519,20 @@ onClick={requestValoNotificationPermission}
                                             {order.status === 'Preparing' && <button onClick={() => updateOrder(order.id, {status: 'Ready'})} className="bg-green-600 px-6 py-3 rounded-lg font-bold flex-1">Ready</button>}
                                             
                                           {order.status === 'Ready' && (
-    <button 
+    <button
+        disabled={order.paymentStatus !== 'Paid'}
         onClick={async () => {
+            if (order.paymentStatus !== 'Paid') return;
             const result = await updateOrder(order.id, {status: 'Picked Up'});
             if (result?.error) return;
-        }} 
+        }}
         className={`px-6 py-3 rounded-lg font-bold flex-1 transition-all ${
-            order.paymentStatus === 'Paid' 
-                ? 'bg-slate-600 hover:bg-slate-500 text-white shadow-lg' 
-                : 'bg-yellow-500 hover:bg-yellow-400 text-black shadow-lg'
+            order.paymentStatus === 'Paid'
+                ? 'bg-slate-600 hover:bg-slate-500 text-white shadow-lg'
+                : 'bg-slate-800 text-gray-500 cursor-not-allowed opacity-50'
         }`}
     >
-        {order.paymentStatus === 'Paid' ? 'Complete' : 'Complete (Pending)'}
+        {order.paymentStatus === 'Paid' ? 'Complete' : '🔒 Complete — Mark Paid First'}
     </button>
 
 )}
