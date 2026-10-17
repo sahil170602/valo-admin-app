@@ -353,9 +353,8 @@ const requestValoNotificationPermission = async () => {
                     window.__VALO_ONESIGNAL_NATIVE_INITIALIZED = true;
                 }
             } catch (e) { console.warn('Native OneSignal initialize warning:', e); }
-            const local = await LocalNotifications.requestPermissions();
-            let accepted = local?.display === 'granted';
-            try { if (OneSignal?.Notifications?.requestPermission) accepted = (await OneSignal.Notifications.requestPermission(true)) || accepted; }
+            let accepted = false;
+            try { if (OneSignal?.Notifications?.requestPermission) accepted = await OneSignal.Notifications.requestPermission(true); }
             catch (e) { console.warn('Native OneSignal permission warning:', e); }
             if (accepted) alert('Notifications enabled successfully!');
             else alert('Notification permission was denied.');
@@ -384,10 +383,12 @@ const sendRemoteAdminNotification = async (title, body, data = {}) => {
 
 const sendAdminNotification = async (title, body, data = {}) => {
     try {
-        if (Capacitor.isNativePlatform()) await scheduleNativeLocalNotification(title, body, data);
-        else await showWebNotification(title, body, data);
+        // System notification panel only. Do not create an in-app toast
+        // or a separate local notification that can duplicate OneSignal.
         await sendRemoteAdminNotification(title, body, data);
-    } catch (err) { console.error('Admin notification error:', err); }
+    } catch (err) {
+        console.error('Admin notification error:', err);
+    }
 };
 
 export default function AdminPanel() {
@@ -639,6 +640,9 @@ function AdminDashboard({ appMode, toggleMode, operator, onLockApp }) {
     const [expenseAmount, setExpenseAmount] = useState('');
     const [expenseMode, setExpenseMode] = useState('Cash');
     const [expensePersonalMoney, setExpensePersonalMoney] = useState(false);
+    // Taken Cash means the expense is paid from cash that was already
+    // withdrawn from the Daily Cash Box. It must not reduce System Cash again.
+    const [expenseTakenCash, setExpenseTakenCash] = useState(false);
     const [expenseDateFilter, setExpenseDateFilter] = useState(() => getFormattedDateForInput());
 
     // Barcode Scanning State
@@ -687,6 +691,14 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
     const [valoUpiId, setValoUpiId] = useState('');
     const [menuRecipes, setMenuRecipes] = useState({});
     const [recipeModal, setRecipeModal] = useState({ open: false, menuItem: null, rows: [] });
+    // One temporary ingredient form. Clicking Add Ingredient moves it into
+    // recipeModal.rows, exactly like adding an item to a bill list.
+    const [recipeDraft, setRecipeDraft] = useState({
+        inventory_item_id: '',
+        recipeSearch: '',
+        quantity: 1,
+        unit: 'Unit'
+    });
     const [recipeSearch, setRecipeSearch] = useState({});
     const [removeItemConfirm, setRemoveItemConfirm] = useState({ open: false, itemName: '', onDecision: null });
     const [mergeModal, setMergeModal] = useState({ open: false, firstId: '', secondId: '' });
@@ -717,14 +729,11 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
     const [syncError, setSyncError] = useState('');
     const [offlinePopup, setOfflinePopup] = useState(false);
 
-    const pushAppNotification = (title, body, type = 'info') => {
-        const id = `${Date.now()}_${Math.random()}`;
-        setAppNotifications(prev => [{ id, title, body, type, createdAt: Date.now() }, ...prev].slice(0, 6));
-        window.setTimeout(() => setAppNotifications(prev => prev.filter(item => item.id !== id)), 6500);
-    };
+    // In-app notification toasts are disabled.
+    // Business notifications appear only in the device/browser notification panel.
+    const pushAppNotification = () => {};
 
     const notifyOrderEvent = async (title, body, data = {}, type = 'info') => {
-        pushAppNotification(title, body, type);
         await sendAdminNotification(title, body, data);
     };
 
@@ -894,10 +903,19 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
 
                 await syncOfflineSupabaseQueue(processCustomOfflineQueue);
 
-                // Refresh local React state, but never let a slow Supabase read
-                // keep the blocking sync overlay stuck on screen.
-                if (typeof fetchData === 'function' && !isBrowserOffline()) {
-                    const refreshResult = await runWithTimeout(fetchData(), 7000);
+                // Reconcile only the tables that can be changed by the custom
+                // offline queue. The old code called fetchData() here, which
+                // downloaded the complete dashboard again after every sync.
+                // Realtime already updates the other tables directly.
+                if (!isBrowserOffline()) {
+                    const refreshResult = await runWithTimeout(
+                        Promise.all([
+                            fetchOrders(),
+                            fetchInventory(),
+                            fetchMenuRecipes()
+                        ]),
+                        7000
+                    );
                     if (refreshResult?.__timedOut) {
                         console.warn('VALO sync refresh timed out; local synced state will remain visible.');
                     }
@@ -1188,7 +1206,7 @@ const logOrderActivity = async (orderId, action, description) => {
 
 const openOrderActivity = async (order) => {
     setOrderActivityModal({ open: true, orderId: order.id, orderLabel: order.displayId || order.id, rows: [], loading: true });
-    const { data, error } = await supabase.from('order_activity_log').select('*').eq('order_id', order.id).order('created_at', { ascending: false }).limit(100);
+    const { data, error } = await supabase.from('order_activity_log').select('id,operator_name,operator_role,action,description,created_at').eq('order_id', order.id).order('created_at', { ascending: false }).limit(100);
     if (error) {
         console.error('Activity load error:', error);
         setOrderActivityModal(prev => ({ ...prev, rows: [], loading: false }));
@@ -1302,7 +1320,9 @@ useEffect(() => {
 
             // CLOSE RECIPE MODAL
             if (recipeModal.open) {
-                setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] });
+                setRecipeSearch({});
+                setRecipeDraft({ inventory_item_id: '', recipeSearch: '', quantity: 1, unit: 'Unit' });
+                setRecipeModal({ open: false, menuItem: null, rows: [] });
                 return;
             }
 
@@ -1530,117 +1550,159 @@ useEffect(() => {
     };
 
     // ============================================================
-    // DATA LOADERS
-    // Initial load fetches all dashboard data once. After that, mutations
-    // use targeted table refreshes instead of re-downloading every table.
-    // This preserves the existing functionality while substantially reducing
-    // Supabase egress.
+    // LOCAL-FIRST DATA LOADERS
+    // Hydrate this device from IndexedDB immediately, then silently refresh
+    // Supabase in the background. IndexedDB is used instead of localStorage
+    // because order history and image fields can exceed localStorage limits.
+    // Supabase reads are paginated to avoid the default 1,000-row cap.
     // ============================================================
-    const fetchOrders = async () => {
-        const { data: ord } = await supabase.from('orders').select('*').order('id', { ascending: false });
-        if (ord) {
-            const formatted = ord.map(o => ({
-                ...o.order_details,
-                order_details: o.order_details || {},
-                id: o.id,
-                status: o.status,
-                tableNo: o.table_no,
-                total: o.total,
-                merged_into_id: o.merged_into_id ?? null,
-                merged_order_label: o.merged_order_label ?? null
-            }));
-            setOrders(formatted);
-            const hasPending = formatted.some(o => o.status === 'Received');
-            if (hasPending) playAlert(); else stopAlert();
+    const LOCAL_DATA_CACHE_VERSION = 'v2';
+    const DATA_PAGE_SIZE = 500;
+
+    const fetchAllRows = async (queryFactory, label) => {
+        const allRows = [];
+        for (let from = 0; ; from += DATA_PAGE_SIZE) {
+            const { data, error } = await queryFactory().range(from, from + DATA_PAGE_SIZE - 1);
+            if (error) throw error;
+            const page = Array.isArray(data) ? data : [];
+            allRows.push(...page);
+            if (page.length < DATA_PAGE_SIZE) break;
+        }
+        return allRows;
+    };
+
+    const loadCachedThenRefresh = async (cacheName, setter, fetcher, transform = value => value) => {
+        const cacheKey = `valo:dashboard:${LOCAL_DATA_CACHE_VERSION}:${cacheName}`;
+        // First paint from the last successful snapshot on this device.
+        try {
+            const cached = await getOfflineCache(cacheKey);
+            if (Array.isArray(cached)) setter(transform(cached));
+        } catch (error) {
+            console.warn(`VALO local cache read skipped (${cacheName}):`, error);
+        }
+
+        // Quiet background refresh. Never replace useful cached data with an
+        // empty array or failed/partial response.
+        if (isBrowserOffline()) return;
+        try {
+            const fresh = await fetcher();
+            if (!Array.isArray(fresh)) return;
+            await setOfflineCache(cacheKey, fresh);
+            setter(transform(fresh));
+        } catch (error) {
+            console.warn(`VALO background refresh failed (${cacheName}); keeping local data:`, error);
         }
     };
 
-    const fetchUsers = async () => {
-        const { data } = await supabase.from('users').select('*').order('joined_at', { ascending: false });
-        if (data) setUsers(data);
-    };
+    const fetchOrders = async () => loadCachedThenRefresh(
+        'orders', setOrders,
+        () => fetchAllRows(
+            () => supabase.from('orders')
+                .select('id,order_details,status,table_no,total,merged_into_id,merged_order_label,item_names')
+                .order('id', { ascending: false }),
+            'orders'
+        ),
+        rows => rows.map(o => ({
+            ...(o.order_details || {}),
+            order_details: o.order_details || {},
+            id: o.id,
+            status: o.status,
+            tableNo: o.table_no,
+            total: o.total,
+            merged_into_id: o.merged_into_id ?? null,
+            merged_order_label: o.merged_order_label ?? null,
+            item_names: o.item_names ?? o.order_details?.item_names ?? ''
+        })).sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
+    );
 
-    const fetchCategories = async () => {
-        const { data } = await supabase.from('categories').select('*').order('id', { ascending: true });
-        if (data) setCategories(data);
-    };
+    const fetchUsers = async () => loadCachedThenRefresh(
+        'users', setUsers,
+        () => fetchAllRows(
+            () => supabase.from('users').select('id,name,phone,joined_at,total_orders').order('joined_at', { ascending: false }),
+            'users'
+        )
+    );
 
-    const fetchMenuItems = async () => {
-        const { data } = await supabase.from('menu_items').select('*').order('id', { ascending: true });
-        if (data) setMenuItems(data);
-    };
+    const fetchCategories = async () => loadCachedThenRefresh(
+        'categories', setCategories,
+        () => fetchAllRows(() => supabase.from('categories').select('id,name').order('id', { ascending: true }), 'categories')
+    );
 
-    const fetchMenuRecipes = async () => {
-        const { data, error } = await supabase
-            .from('menu_item_recipes')
-            .select('id, menu_item_id, inventory_item_id, quantity, unit')
-            .order('id', { ascending: true });
+    const fetchMenuItems = async () => loadCachedThenRefresh(
+        'menu_items', setMenuItems,
+        () => fetchAllRows(() => supabase.from('menu_items').select('id,category_id,name,price,description,img,is_special,in_stock'), 'menu_items'),
+        rows => [...rows].sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
+    );
 
-        if (error) {
-            console.error('Recipe load error:', error);
-            return;
-        }
+    const fetchMenuRecipes = async () => loadCachedThenRefresh(
+        'menu_item_recipes',
+        rows => {
+            const grouped = {};
+            (rows || []).forEach(row => {
+                if (!grouped[row.menu_item_id]) grouped[row.menu_item_id] = [];
+                grouped[row.menu_item_id].push(row);
+            });
+            setMenuRecipes(grouped);
+        },
+        () => fetchAllRows(
+            () => supabase.from('menu_item_recipes').select('id,menu_item_id,inventory_item_id,quantity,unit').order('id', { ascending: true }),
+            'menu_item_recipes'
+        )
+    );
 
-        const grouped = {};
-        (data || []).forEach(row => {
-            if (!grouped[row.menu_item_id]) grouped[row.menu_item_id] = [];
-            grouped[row.menu_item_id].push(row);
-        });
-        setMenuRecipes(grouped);
-    };
+    const fetchMoments = async () => loadCachedThenRefresh(
+        'moments', setMoments,
+        () => fetchAllRows(() => supabase.from('moments').select('id,caption,src').order('id', { ascending: false }), 'moments')
+    );
 
-    const fetchMoments = async () => {
-        const { data } = await supabase.from('moments').select('*').order('id', { ascending: false });
-        if (data) setMoments(data);
-    };
+    const fetchInventory = async () => loadCachedThenRefresh(
+        'inventory_items', setInventoryItems,
+        () => fetchAllRows(() => supabase.from('inventory_items').select('id,name,category,stock,price,barcode,unit').order('name', { ascending: true }), 'inventory_items')
+    );
 
-    const fetchInventory = async () => {
-        const { data } = await supabase.from('inventory_items').select('*').order('name', { ascending: true });
-        if (data) setInventoryItems(data);
-    };
+    const fetchExpenses = async () => loadCachedThenRefresh(
+        'expenses', setExpenses,
+        () => fetchAllRows(() => supabase.from('expenses').select('id,date,time,description,mode,personal_money,cash_source,amount,timestamp').order('timestamp', { ascending: false }), 'expenses')
+    );
 
-    const fetchExpenses = async () => {
-        const { data } = await supabase.from('expenses').select('*').order('timestamp', { ascending: false });
-        if (data) setExpenses(data);
-    };
+    const fetchStaffExpenses = async () => loadCachedThenRefresh(
+        'staff_expenses', setStaffExpenses,
+        () => fetchAllRows(() => supabase.from('staff_expenses').select('id,date,time,staff_name,item_name,qty,price,total,is_inv,cash_source,timestamp').order('timestamp', { ascending: false }), 'staff_expenses')
+    );
 
-    const fetchStaffExpenses = async () => {
-        const { data } = await supabase.from('staff_expenses').select('*').order('timestamp', { ascending: false });
-        if (data) setStaffExpenses(data);
-    };
+    const fetchMissingItems = async () => loadCachedThenRefresh(
+        'missing_items', setMissingItemsData,
+        () => fetchAllRows(() => supabase.from('missing_items').select('id,date,time,type,item_name,qty,total,is_inv,timestamp').order('timestamp', { ascending: false }), 'missing_items')
+    );
 
-    const fetchMissingItems = async () => {
-        const { data } = await supabase.from('missing_items').select('*').order('timestamp', { ascending: false });
-        if (data) setMissingItemsData(data);
-    };
+    const fetchPurchases = async () => loadCachedThenRefresh(
+        'stock_purchases', setPurchasesData,
+        () => fetchAllRows(() => supabase.from('stock_purchases').select('id,date,time,item_name,qty,unit_price,total_cost,purchase_type,timestamp').order('timestamp', { ascending: false }), 'stock_purchases')
+    );
 
-    const fetchPurchases = async () => {
-        const { data } = await supabase.from('stock_purchases').select('*').order('timestamp', { ascending: false });
-        if (data) setPurchasesData(data);
-    };
+    const fetchDrawerCash = async () => loadCachedThenRefresh(
+        'drawer_cash', setDrawerCashRecords,
+        () => fetchAllRows(() => supabase.from('drawer_cash').select('id,date,time,timestamp,taken_by,taken_out,system_cash,total_taken_out,expected_cash,amount,difference').order('timestamp', { ascending: false }), 'drawer_cash')
+    );
 
-    const fetchDrawerCash = async () => {
-        const { data } = await supabase.from('drawer_cash').select('*').order('timestamp', { ascending: false });
-        if (data) setDrawerCashRecords(data);
-    };
-
+    // Share one initial refresh across callers to avoid duplicate downloads.
+    const dataLoadPromiseRef = useRef(null);
     const fetchData = async () => {
-        await Promise.all([
-            fetchOrders(),
-            fetchUsers(),
-            fetchCategories(),
-            fetchMenuItems(),
-            fetchMenuRecipes(),
-            fetchMoments(),
-            fetchInventory(),
-            fetchExpenses(),
-            fetchStaffExpenses(),
-            fetchMissingItems(),
-            fetchPurchases(),
-            fetchDrawerCash()
-        ]);
+        if (dataLoadPromiseRef.current) return dataLoadPromiseRef.current;
+        dataLoadPromiseRef.current = (async () => {
+            // Each loader paints cached device data first, then refreshes quietly.
+            await Promise.all([
+                fetchCategories(), fetchMenuItems(), fetchMenuRecipes(), fetchOrders(),
+                fetchUsers(), fetchMoments(), fetchInventory(), fetchExpenses(),
+                fetchStaffExpenses(), fetchMissingItems(), fetchPurchases(), fetchDrawerCash()
+            ]);
+        })();
+        try {
+            await dataLoadPromiseRef.current;
+        } finally {
+            dataLoadPromiseRef.current = null;
+        }
     };
-
 
     // ============================================================
     // LOW-EGRESS REALTIME SYNC
@@ -1871,13 +1933,61 @@ useEffect(() => {
             menuItem,
             rows: rows.map(r => {
                 const inv = inventoryItems.find(i => Number(i.id) === Number(r.inventory_item_id));
-                return { ...r, recipeSearch: inv?.name || '' };
+                return { ...r, recipeSearch: inv?.name || '', recipeSelected: !!inv };
             })
+        });
+        setRecipeDraft({
+            inventory_item_id: '',
+            recipeSearch: '',
+            quantity: 1,
+            unit: 'Unit'
         });
         setRecipeSearch({});
     };
 
-    const addRecipeRow = () => {
+    // Add the currently selected draft ingredient to the recipe list.
+    // The draft form stays as ONE box; every added ingredient becomes a
+    // compact list row underneath it.
+    const addRecipeIngredient = () => {
+        const invId = Number(recipeDraft.inventory_item_id);
+        const quantity = Number(recipeDraft.quantity);
+        if (!invId) {
+            alert('Please select an inventory item first.');
+            return;
+        }
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+            alert('Please enter a valid quantity.');
+            return;
+        }
+
+        const inv = inventoryItems.find(i => Number(i.id) === invId);
+        if (!inv) {
+            alert('Inventory item could not be found.');
+            return;
+        }
+
+        const unit = recipeDraft.unit || inv.unit || 'Unit';
+        if (!['Packet', 'Kg', 'Gram', 'Unit'].includes(unit)) {
+            alert('Invalid recipe unit.');
+            return;
+        }
+
+        if (unit !== inv.unit && !(
+            (unit === 'Kg' && inv.unit === 'Gram') ||
+            (unit === 'Gram' && inv.unit === 'Kg')
+        )) {
+            alert(`${inv.name}: inventory is ${inv.unit}, but recipe uses ${unit}. Use the same unit, or Kg/Gram.`);
+            return;
+        }
+
+        const duplicate = recipeModal.rows.some(
+            row => Number(row.inventory_item_id) === invId
+        );
+        if (duplicate) {
+            alert(`${inv.name} is already in this recipe.`);
+            return;
+        }
+
         setRecipeModal(prev => ({
             ...prev,
             rows: [
@@ -1885,19 +1995,31 @@ useEffect(() => {
                 {
                     id: `new_${Date.now()}_${Math.random()}`,
                     menu_item_id: prev.menuItem?.id,
-                    inventory_item_id: '',
-                    quantity: 1,
-                    unit: 'Unit',
-                    recipeSearch: ''
+                    inventory_item_id: invId,
+                    quantity,
+                    unit,
+                    recipeSearch: inv.name,
+                    recipeSelected: true
                 }
             ]
         }));
+
+        setRecipeDraft({
+            inventory_item_id: '',
+            recipeSearch: '',
+            quantity: 1,
+            unit: 'Unit'
+        });
     };
 
     const updateRecipeRow = (index, field, value) => {
         setRecipeModal(prev => ({
             ...prev,
-            rows: prev.rows.map((row, i) => i === index ? { ...row, [field]: field === 'inventory_item_id' ? Number(value) : value } : row)
+            rows: prev.rows.map((row, i) =>
+                i === index
+                    ? { ...row, [field]: field === 'inventory_item_id' ? Number(value) : value }
+                    : row
+            )
         }));
     };
 
@@ -1971,7 +2093,9 @@ useEffect(() => {
         }
 
         await fetchMenuRecipes();
-        setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] });
+        setRecipeSearch({});
+        setRecipeDraft({ inventory_item_id: '', recipeSearch: '', quantity: 1, unit: 'Unit' });
+        setRecipeModal({ open: false, menuItem: null, rows: [] });
         alert(`Recipe saved for ${recipeModal.menuItem.name}.`);
     };
 
@@ -2097,13 +2221,21 @@ useEffect(() => {
         else executeToggle();
     };
 
+    // Menu Manager IN/OUT stock toggle is intentionally PIN-free.
     const toggleStock = async (item) => {
-        const executeToggle = async () => {
-            await supabase.from('menu_items').update({ in_stock: !item.in_stock }).eq('id', item.id);
-            await fetchMenuItems();
-        };
-        if (!isUnlocked) setActionAuth({ open: true, onConfirm: executeToggle });
-        else executeToggle();
+        const nextInStock = item.in_stock === false;
+        const { error } = await supabase
+            .from('menu_items')
+            .update({ in_stock: nextInStock })
+            .eq('id', item.id);
+
+        if (error) {
+            console.error('Failed to update menu item stock status:', error);
+            alert('Could not update stock status. Please try again.');
+            return;
+        }
+
+        await fetchMenuItems();
     };
 
     const handleSaveMoment = async (e) => {
@@ -2845,6 +2977,9 @@ const handleSaveMissingItem = async (e) => {
         });
     };
 
+    // Recipe ingredients are stock consumption only. Their inventory selling
+    // price is NEVER added to the menu dish price. Inventory price is used
+    // only when that inventory item is sold directly as a custom/POS item.
     const calculateOrderTotalFromItems = (itemsObj = {}, customItemsArr = []) => {
         let total = 0;
         Object.entries(itemsObj || {}).forEach(([id, qty]) => {
@@ -3780,6 +3915,9 @@ const handleCreateBillOnline = async () => {
         let addedTotal = 0;
 
         billItemsList.forEach(item => {
+            // Directly sold inventory items use their own selling price.
+            // Recipe ingredients are consumed from stock and are NOT billItemsList
+            // entries, so their inventory price is never added to the bill.
             addedTotal += item.price * item.qty;
             if (item.menuId) {
                 regularItems[item.menuId] = (regularItems[item.menuId] || 0) + item.qty;
@@ -4257,6 +4395,10 @@ const handleCreateBillOnline = async () => {
         e.preventDefault();
         if(!expenseDesc || !expenseAmount) return;
 
+        const isPersonalExpense = expensePersonalMoney === true;
+        const isCashExpense = String(expenseMode).toLowerCase() === 'cash';
+        const isTakenCashExpense = isCashExpense && !isPersonalExpense && expenseTakenCash === true;
+
         const newExpense = {
             date: getFormattedDate(),
             time: getFormattedTime(),
@@ -4264,7 +4406,14 @@ const handleCreateBillOnline = async () => {
             amount: Number(expenseAmount),
             description: expenseDesc,
             mode: expenseMode,
-            personal_money: expensePersonalMoney === true
+            personal_money: isPersonalExpense,
+            // Taken Cash has already been removed from the physical drawer.
+            // Keep it as a separate source so it does not reduce System Cash again.
+            cash_source: isPersonalExpense
+                ? 'Personal Money'
+                : isCashExpense
+                    ? (isTakenCashExpense ? 'Taken Cash' : 'Daily Cash Box')
+                    : 'Online Account'
         };
 
         const { error } = await supabase.from('expenses').insert([newExpense]);
@@ -4274,6 +4423,7 @@ const handleCreateBillOnline = async () => {
             setExpenseDesc('');
             setExpenseAmount('');
             setExpensePersonalMoney(false);
+            setExpenseTakenCash(false);
             alert("Expense Saved!");
             await fetchExpenses();
         }
@@ -4286,56 +4436,22 @@ const handleCreateBillOnline = async () => {
         }
     };
 
-   const getCurrentDrawerCash = () => {
-        let cashIn = 0;
-        let cashOut = 0;
-
-        // Cash received from completed + paid orders.
-        orders.forEach(o => {
-            if (o.status === 'Picked Up' && o.paymentStatus === 'Paid') {
-                const pm = String(o.paymentMethod || 'Cash').toLowerCase();
-
-                if (pm === 'split') {
-                    cashIn += Number(o.splitAmounts?.cash || 0);
-                } else if (
-                    !pm.includes('online') &&
-                    !pm.includes('upi') &&
-                    !pm.includes('card')
-                ) {
-                    cashIn += Number(o.total || 0);
-                }
-            }
-        });
-
-        // Only NON-personal cash expenses reduce the Daily Box.
-        // Personal-money expenses are recorded for accounting but do not
-        // touch the physical hotel cash drawer.
+    const getCurrentDrawerCash = () => {
+        // IMPORTANT: System Cash must be exactly the same number as
+        // Expense Management -> Remaining Cash.
         //
-        // Stock purchases are already auto-logged into expenses, so they
-        // must NOT be subtracted separately here (avoids double counting).
-        expenses.forEach(e => {
-            const isPersonal = e.personal_money === true;
-            const isCash = String(e.mode || '').toLowerCase() === 'cash';
-
-            if (!isPersonal && isCash) {
-                cashOut += Number(e.amount || 0);
-            }
-        });
-
-        // Staff direct money/advances reduce the Daily Cash Box ONLY when
-        // explicitly marked as paid from the hotel cash box.
-        staffExpenses.forEach(se => {
-            const isMoneyExpense =
-                String(se.item_name || '').toLowerCase() === 'money';
-            const isDailyCashBox =
-                String(se.cash_source || '').trim() === 'Daily Cash Box';
-
-            if (isMoneyExpense && isDailyCashBox) {
-                cashOut += Number(se.total || 0);
-            }
-        });
-
-        return Math.max(0, cashIn - cashOut);
+        // Do not subtract Taken Cash here. Taken Cash is already tracked
+        // separately by the Cash Drawer reconciliation as:
+        // System Cash - Total Taken Out = Expected In Box.
+        //
+        // calculateDailyFinancials uses the same cash-income/cash-out
+        // definition, so this keeps both screens mathematically identical.
+        try {
+            const remainingCash = Number(financials?.lifetimeCashRem);
+            return Number.isFinite(remainingCash) ? remainingCash : 0;
+        } catch (_) {
+            return 0;
+        }
     };
 
     // ============================================================
@@ -4529,6 +4645,7 @@ const handleCreateBillOnline = async () => {
             const amount = Number(e.amount || 0);
             const isPersonal = e.personal_money === true;
             const isOnline = String(e.mode || '').toLowerCase() === 'online';
+            const cashSource = String(e.cash_source || '').trim();
 
             if (isPersonal) {
                 if (isOnline) {
@@ -4538,8 +4655,40 @@ const handleCreateBillOnline = async () => {
                 }
             } else if (isOnline) {
                 dailyData[nDate].onlineOut += amount;
+            } else if (cashSource === 'Taken Cash') {
+                // Taken Cash is money already removed from the drawer.
+                // It must NOT reduce Remaining Cash/System Cash again.
             } else {
                 dailyData[nDate].cashOut += amount;
+            }
+        });
+
+        // Staff money advances affect business cash only when explicitly
+        // paid from the Daily Cash Box. Taken/Personal sources stay separate.
+        staffExpenses.forEach(se => {
+            const nDate = normalizeDateStr(se.date);
+            if (!nDate) return;
+
+            if (!dailyData[nDate]) {
+                dailyData[nDate] = {
+                    cashIn: 0,
+                    onlineIn: 0,
+                    cashOut: 0,
+                    onlineOut: 0,
+                    personalCashOut: 0,
+                    personalOnlineOut: 0
+                };
+            }
+
+            const isMoneyExpense =
+                String(se.item_name || '').toLowerCase() === 'money';
+            const cashSource = String(se.cash_source || '').trim();
+            const amount = Number(se.total || 0);
+
+            if (isMoneyExpense && cashSource === 'Daily Cash Box') {
+                dailyData[nDate].cashOut += amount;
+            } else if (isMoneyExpense && cashSource === 'Personal Money') {
+                dailyData[nDate].personalCashOut += amount;
             }
         });
 
@@ -5562,15 +5711,6 @@ const handleCreateBillOnline = async () => {
 
         <audio ref={audioRef} loop src={alertTone} />
 
-        {/* --- CUSTOM VALO NOTIFICATION TOASTS --- */}
-        <div className="fixed top-4 right-4 z-[600] w-[min(92vw,380px)] space-y-2 pointer-events-none">
-            {appNotifications.map(note => (
-                <div key={note.id} className={`pointer-events-auto bg-slate-800/95 backdrop-blur-xl border rounded-2xl shadow-2xl p-4 animate-fade-in ${note.type === 'danger' ? 'border-red-500/40' : note.type === 'success' ? 'border-green-500/40' : note.type === 'warning' ? 'border-yellow-500/40' : 'border-cyan-500/30'}`}>
-                    <div className="flex items-start gap-3"><div className="text-xl">🔔</div><div className="min-w-0 flex-1"><p className="font-black text-white text-sm">{note.title}</p><p className="text-xs text-gray-300 mt-1">{note.body}</p></div><button type="button" onClick={() => setAppNotifications(prev => prev.filter(x => x.id !== note.id))} className="text-gray-500 hover:text-white">×</button></div>
-                </div>
-            ))}
-        </div>
-
         {offlinePopup && !isOnline && (
             <div className="fixed inset-0 z-[850] flex items-center justify-center bg-black/45 backdrop-blur-[2px] p-4 pointer-events-none">
                 <div className="w-full max-w-sm rounded-3xl border border-red-400/30 bg-slate-900/95 shadow-2xl p-6 text-center animate-fade-in">
@@ -6355,87 +6495,185 @@ const handleCreateBillOnline = async () => {
           {/* --- RECIPE EDITOR MODAL --- */}
           {recipeModal.open && (
               <div className="fixed inset-0 z-[125] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
-                  <div className="bg-slate-800 p-6 rounded-2xl w-full max-w-2xl border border-orange-500/30 shadow-2xl relative max-h-[90vh] overflow-y-auto">
-                      <button onClick={() => { setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] }); }} className="absolute top-4 right-4 text-gray-400 hover:text-red-400 text-2xl">✕</button>
-                      <h3 className="text-xl font-black text-orange-400 mb-1">🍳 Recipe — {recipeModal.menuItem?.name}</h3>
-                      <p className="text-xs text-gray-400 mb-6">Select the inventory item and exact quantity consumed for one sale.</p>
+                  <div className="bg-slate-800 p-5 rounded-2xl w-full max-w-2xl border border-orange-500/30 shadow-2xl relative max-h-[90vh] overflow-y-auto">
+                      <button
+                          onClick={() => {
+                              setRecipeSearch({});
+                              setRecipeDraft({ inventory_item_id: '', recipeSearch: '', quantity: 1, unit: 'Unit' });
+                              setRecipeModal({ open: false, menuItem: null, rows: [] });
+                          }}
+                          className="absolute top-4 right-4 text-gray-400 hover:text-red-400 text-2xl"
+                      >
+                          ✕
+                      </button>
 
-                      {recipeModal.rows.length === 0 && (
-                          <div className="bg-black/20 border border-white/5 rounded-xl p-5 text-sm text-gray-400 text-center mb-4">
-                              No ingredients added yet.
-                          </div>
-                      )}
+                      <h3 className="text-xl font-black text-orange-400 mb-1">
+                          🍳 Recipe — {recipeModal.menuItem?.name}
+                      </h3>
+                      <p className="text-xs text-gray-400 mb-4">
+                          Select an inventory item, enter the quantity used for one sale, then add it to the recipe list.
+                      </p>
 
-                      <div className="space-y-3">
-                          {recipeModal.rows.map((row, index) => {
-                              const inv = inventoryItems.find(i => Number(i.id) === Number(row.inventory_item_id));
-                              const inventoryUnit = inv?.unit || 'Unit';
-                              return (
-                                  <div key={row.id || `${row.inventory_item_id}_${index}`} className="bg-black/20 border border-white/10 rounded-xl p-3 grid grid-cols-1 md:grid-cols-[1fr_120px_120px_44px] gap-2 items-center">
-                                      <div className="relative">
-                                          <input
-                                              type="text"
-                                              value={row.recipeSearch ?? ''}
-                                              onChange={e => {
-                                                  const value = e.target.value;
-                                                  updateRecipeRow(index, 'recipeSearch', value);
-                                                  if (!value.trim()) updateRecipeRow(index, 'inventory_item_id', '');
-                                              }}
-                                              onFocus={() => {
-                                                  if (row.inventory_item_id) {
-                                                      const selected = inventoryItems.find(i => Number(i.id) === Number(row.inventory_item_id));
-                                                      if (selected) updateRecipeRow(index, 'recipeSearch', selected.name);
-                                                  }
-                                              }}
-                                              className="w-full bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm outline-none focus:border-orange-500"
-                                              placeholder="Type inventory item name..."
-                                          />
-                                          {!!String(row.recipeSearch || '').trim() && (
-                                              <div className="absolute z-20 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-slate-900 border border-orange-500/30 rounded-lg shadow-2xl">
-                                                  {inventoryItems
-                                                      .filter(item => String(item.name || '').toLowerCase().includes(String(row.recipeSearch || '').toLowerCase()))
-                                                      .slice(0, 10)
-                                                      .map(item => (
-                                                          <button
-                                                              key={item.id}
-                                                              type="button"
-                                                              onClick={() => {
-                                                                  updateRecipeRow(index, 'inventory_item_id', item.id);
-                                                                  updateRecipeRow(index, 'unit', item.unit || 'Unit');
-                                                                  updateRecipeRow(index, 'recipeSearch', item.name);
-                                                              }}
-                                                              className="w-full text-left px-3 py-2.5 text-sm text-white hover:bg-orange-500/20 border-b border-white/5 last:border-0"
-                                                          >
-                                                              <span className="font-semibold">{item.name}</span>
-                                                              <span className="text-xs text-gray-400 ml-2">({item.unit || 'Unit'}) • Stock {item.stock}</span>
-                                                          </button>
-                                                      ))}
-                                                  {inventoryItems.filter(item => String(item.name || '').toLowerCase().includes(String(row.recipeSearch || '').toLowerCase())).length === 0 && (
-                                                      <div className="px-3 py-3 text-xs text-gray-500">No inventory item found.</div>
-                                                  )}
-                                              </div>
-                                          )}
+                      {/* ONE ingredient input box */}
+                      <div className="bg-black/20 border border-orange-500/20 rounded-xl p-3 mb-4">
+                          <div className="grid grid-cols-1 md:grid-cols-[1fr_110px_110px_auto] gap-2 items-start">
+                              <div className="relative">
+                                  <input
+                                      type="text"
+                                      value={recipeDraft.recipeSearch}
+                                      onChange={e => {
+                                          const value = e.target.value;
+                                          const selected = inventoryItems.find(
+                                              item => Number(item.id) === Number(recipeDraft.inventory_item_id)
+                                          );
+                                          setRecipeDraft(prev => ({
+                                              ...prev,
+                                              recipeSearch: value,
+                                              inventory_item_id: value.trim() === '' ? '' : (
+                                                  selected?.name === value ? prev.inventory_item_id : ''
+                                              )
+                                          }));
+                                      }}
+                                      onFocus={() => {
+                                          setRecipeDraft(prev => ({ ...prev }));
+                                      }}
+                                      className="w-full bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm outline-none focus:border-orange-500"
+                                      placeholder="Type inventory item name..."
+                                  />
+
+                                  {!!String(recipeDraft.recipeSearch || '').trim() && !recipeDraft.inventory_item_id && (
+                                      <div className="absolute z-30 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-slate-900 border border-orange-500/30 rounded-lg shadow-2xl">
+                                          {inventoryItems
+                                              .filter(item =>
+                                                  String(item.name || '')
+                                                      .toLowerCase()
+                                                      .includes(String(recipeDraft.recipeSearch || '').toLowerCase())
+                                              )
+                                              .slice(0, 10)
+                                              .map(item => (
+                                                  <button
+                                                      key={item.id}
+                                                      type="button"
+                                                      onClick={() => {
+                                                          setRecipeDraft({
+                                                              inventory_item_id: item.id,
+                                                              recipeSearch: item.name,
+                                                              quantity: 1,
+                                                              unit: item.unit || 'Unit'
+                                                          });
+                                                      }}
+                                                      className="w-full text-left px-3 py-2.5 text-sm text-white hover:bg-orange-500/20 border-b border-white/5 last:border-0"
+                                                  >
+                                                      <span className="font-semibold">{item.name}</span>
+                                                      <span className="text-xs text-gray-400 ml-2">
+                                                          ({item.unit || 'Unit'}) • Stock {item.stock}
+                                                      </span>
+                                                  </button>
+                                              ))}
                                       </div>
+                                  )}
+                              </div>
 
-                                      <input type="number" min="0.001" step="0.001" value={row.quantity} onChange={e => updateRecipeRow(index, 'quantity', e.target.value)} className="bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm" placeholder="Quantity" />
+                              <input
+                                  type="number"
+                                  min="0.001"
+                                  step="0.001"
+                                  value={recipeDraft.quantity}
+                                  onChange={e => setRecipeDraft(prev => ({ ...prev, quantity: e.target.value }))}
+                                  className="bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm"
+                                  placeholder="Qty"
+                              />
 
-                                      <select value={row.unit || inventoryUnit} onChange={e => updateRecipeRow(index, 'unit', e.target.value)} className="bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm">
-                                          <option value="Packet">Packet</option>
-                                          <option value="Kg">Kg</option>
-                                          <option value="Gram">Gram</option>
-                                          <option value="Unit">Unit</option>
-                                      </select>
+                              <select
+                                  value={recipeDraft.unit}
+                                  onChange={e => setRecipeDraft(prev => ({ ...prev, unit: e.target.value }))}
+                                  className="bg-slate-700 border border-white/10 rounded-lg p-3 text-white text-sm"
+                              >
+                                  <option value="Packet">Packet</option>
+                                  <option value="Kg">Kg</option>
+                                  <option value="Gram">Gram</option>
+                                  <option value="Unit">Unit</option>
+                              </select>
 
-                                      <button type="button" onClick={() => removeRecipeRow(index)} className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white rounded-lg p-3">🗑</button>
-                                  </div>
-                              );
-                          })}
+                              <button
+                                  type="button"
+                                  onClick={addRecipeIngredient}
+                                  disabled={!recipeDraft.inventory_item_id}
+                                  className="bg-orange-500 hover:bg-orange-400 text-black px-4 py-3 rounded-lg font-black disabled:opacity-40 disabled:cursor-not-allowed"
+                              >
+                                  + Add
+                              </button>
+                          </div>
+
+                          {recipeDraft.inventory_item_id && (
+                              <div className="mt-2 text-[11px] text-green-400 font-bold">
+                                  ✓ {recipeDraft.recipeSearch} selected — recipe quantity only
+                              </div>
+                          )}
+                      </div>
+
+                      {/* Added ingredients list — one compact list, like Create Bill */}
+                      <div className="space-y-2">
+                          {recipeModal.rows.length === 0 ? (
+                              <div className="bg-black/20 border border-white/5 rounded-xl p-4 text-sm text-gray-400 text-center">
+                                  No ingredients added yet.
+                              </div>
+                          ) : (
+                              recipeModal.rows.map((row, index) => {
+                                  const inv = inventoryItems.find(
+                                      i => Number(i.id) === Number(row.inventory_item_id)
+                                  );
+                                  return (
+                                      <div
+                                          key={row.id || `${row.inventory_item_id}_${index}`}
+                                          className="bg-black/20 border border-white/10 rounded-xl px-3 py-2 flex items-center gap-2"
+                                      >
+                                          <div className="flex-1 min-w-0">
+                                              <div className="text-sm font-bold text-white truncate">
+                                                  {inv?.name || row.recipeSearch || 'Ingredient'}
+                                              </div>
+                                              <div className="text-[11px] text-gray-400">
+                                                  Stock {inv?.stock ?? '—'} • recipe quantity only
+                                              </div>
+                                          </div>
+
+                                          <div className="text-sm font-black text-cyan-300 whitespace-nowrap">
+                                              {row.quantity} {row.unit || inv?.unit || 'Unit'}
+                                          </div>
+
+                                          <button
+                                              type="button"
+                                              onClick={() => removeRecipeRow(index)}
+                                              className="bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white rounded-lg px-3 py-2"
+                                          >
+                                              🗑
+                                          </button>
+                                      </div>
+                                  );
+                              })
+                          )}
                       </div>
 
                       <div className="flex flex-wrap gap-3 mt-5">
-                          <button type="button" onClick={addRecipeRow} disabled={!inventoryItems.length} className="bg-orange-500/20 text-orange-400 hover:bg-orange-500 hover:text-white px-4 py-3 rounded-xl font-bold disabled:opacity-40">+ Add Ingredient</button>
-                          <button type="button" onClick={() => { setRecipeSearch({}); setRecipeModal({ open: false, menuItem: null, rows: [] }); }} className="bg-slate-700 text-white px-5 py-3 rounded-xl font-bold">Cancel</button>
-                          <button type="button" onClick={saveRecipeEditor} className="bg-orange-500 hover:bg-orange-400 text-black px-6 py-3 rounded-xl font-black">Save Recipe</button>
+                          <button
+                              type="button"
+                              onClick={() => {
+                                  setRecipeSearch({});
+                                  setRecipeDraft({ inventory_item_id: '', recipeSearch: '', quantity: 1, unit: 'Unit' });
+                                  setRecipeModal({ open: false, menuItem: null, rows: [] });
+                              }}
+                              className="bg-slate-700 text-white px-5 py-3 rounded-xl font-bold"
+                          >
+                              Cancel
+                          </button>
+
+                          <button
+                              type="button"
+                              onClick={saveRecipeEditor}
+                              className="bg-orange-500 hover:bg-orange-400 text-black px-6 py-3 rounded-xl font-black"
+                          >
+                              Save Recipe
+                          </button>
                       </div>
                   </div>
               </div>
@@ -6839,8 +7077,8 @@ const handleCreateBillOnline = async () => {
                                 Cash Drawer Reconciliation
                             </h3>
                             <p className="text-xs text-gray-400 mt-1">
-                                System cash is calculated from paid cash sales minus cash expenses and cash purchases.
-                                Every amount taken out is accumulated automatically.
+                                System Cash always matches Expense Management → Remaining Cash.
+                                Taken Cash is tracked separately, then Expected In Box = System Cash − Total Taken Out.
                             </p>
                         </div>
 
@@ -7700,20 +7938,43 @@ onClick={requestValoNotificationPermission}
                                 <form onSubmit={handleAddExpense} className="flex flex-col md:flex-row gap-4">
                                     <input type="text" placeholder="Description (e.g., Maggie packets)" className="flex-1 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={expenseDesc} onChange={e => setExpenseDesc(e.target.value)} required />
                                     <input type="number" placeholder="Amount (₹)" className="w-full md:w-32 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none" value={expenseAmount} onChange={e => setExpenseAmount(e.target.value)} required min="1" />
-                                    <select value={expenseMode} onChange={e => setExpenseMode(e.target.value)} className="w-full md:w-32 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none">
+                                    <select value={expenseMode} onChange={e => { const mode = e.target.value; setExpenseMode(mode); if (mode !== 'Cash') setExpenseTakenCash(false); }} className="w-full md:w-32 bg-black/30 border border-white/10 rounded-lg p-3 text-white focus:border-cyan-500 outline-none">
                                         <option value="Cash">Cash</option>
                                         <option value="Online">Online</option>
                                     </select>
 
-                                    <label className="flex items-center gap-2 bg-black/20 border border-white/10 rounded-lg px-3 py-2 cursor-pointer md:max-w-[240px]">
-                                        <input
-                                            type="checkbox"
-                                            checked={expensePersonalMoney === true}
-                                            onChange={e => setExpensePersonalMoney(e.target.checked)}
-                                            className="w-4 h-4 accent-orange-500"
-                                        />
-                                        <span className="text-xs text-white font-bold">Paid with Personal Money</span>
-                                    </label>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <label className={`flex items-center gap-2 bg-black/20 border rounded-lg px-3 py-2 cursor-pointer transition ${expensePersonalMoney ? 'border-yellow-400/50 bg-yellow-500/10' : 'border-white/10'}`}>
+                                            <input
+                                                type="checkbox"
+                                                checked={expensePersonalMoney === true}
+                                                onChange={e => {
+                                                    const checked = e.target.checked;
+                                                    setExpensePersonalMoney(checked);
+                                                    if (checked) setExpenseTakenCash(false);
+                                                }}
+                                                className="w-4 h-4 accent-orange-500"
+                                            />
+                                            <span className="text-xs text-white font-bold">Paid with Personal Money</span>
+                                        </label>
+
+                                        {expenseMode === 'Cash' && (
+                                            <label className={`flex items-center gap-2 bg-black/20 border rounded-lg px-3 py-2 cursor-pointer transition ${expenseTakenCash ? 'border-orange-400/50 bg-orange-500/10' : 'border-white/10'}`}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={expenseTakenCash === true}
+                                                    disabled={expensePersonalMoney === true}
+                                                    onChange={e => {
+                                                        const checked = e.target.checked;
+                                                        setExpenseTakenCash(checked);
+                                                        if (checked) setExpensePersonalMoney(false);
+                                                    }}
+                                                    className="w-4 h-4 accent-orange-500 disabled:opacity-40"
+                                                />
+                                                <span className="text-xs text-white font-bold">Taken Cash</span>
+                                            </label>
+                                        )}
+                                    </div>
 
                                     <button type="submit" className="bg-cyan-500 hover:bg-cyan-400 text-black font-bold px-6 py-3 rounded-lg transition shadow-lg whitespace-nowrap">Add Expense</button>
                                 </form>
@@ -7721,17 +7982,18 @@ onClick={requestValoNotificationPermission}
 
                             <div className="flex justify-between items-center mb-4">
                                 <h3 className="text-xl font-bold">Expense Ledger ({financials.dateStr})</h3>
-                                <button onClick={() => exportCSV(financials.dayExpenses.map(e => ({ Date: e.date, Time: e.time, Description: e.description, Mode: e.mode, Personal_Money: e.personal_money === true ? 'YES' : 'NO', Amount: e.amount })), `Expenses_${financials.dateStr.replace(/\//g,'_')}.csv`)} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
+                                <button onClick={() => exportCSV(financials.dayExpenses.map(e => ({ Date: e.date, Time: e.time, Description: e.description, Mode: e.mode, Personal_Money: e.personal_money === true ? 'YES' : 'NO', Cash_Source: e.cash_source || (e.personal_money === true ? 'Personal Money' : e.mode === 'Cash' ? 'Daily Cash Box' : 'Online Account'), Amount: e.amount })), `Expenses_${financials.dateStr.replace(/\//g,'_')}.csv`)} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-lg transition whitespace-nowrap">⬇ Export CSV</button>
                             </div>
                             
                             <div className="bg-slate-800 rounded-xl overflow-hidden border border-white/10 w-full max-w-[100vw] overflow-x-auto shadow-lg">
-                                <table className="w-full text-left text-sm text-gray-400 min-w-[700px]">
+                                <table className="w-full text-left text-sm text-gray-400 min-w-[820px]">
                                     <thead className="bg-black/30 text-white uppercase text-xs">
                                         <tr>
                                             <th className="p-4">Time</th>
                                             <th className="p-4">Description</th>
                                             <th className="p-4">Mode</th>
                                             <th className="p-4">Personal Money</th>
+                                            <th className="p-4">Cash Source</th>
                                             <th className="p-4 text-right">Amount</th>
                                             <th className="p-4 text-center">Action</th>
                                         </tr>
@@ -7748,6 +8010,15 @@ onClick={requestValoNotificationPermission}
                                                     {exp.personal_money === true
                                                         ? <span className="px-2 py-1 rounded text-xs font-bold bg-yellow-500/20 text-yellow-400">YES</span>
                                                         : <span className="px-2 py-1 rounded text-xs font-bold bg-gray-500/20 text-gray-400">NO</span>}
+                                                </td>
+                                                <td className="p-4">
+                                                    {String(exp.cash_source || '').trim() === 'Taken Cash'
+                                                        ? <span className="px-2 py-1 rounded text-xs font-bold bg-orange-500/20 text-orange-400">💰 Taken Cash</span>
+                                                        : String(exp.cash_source || '').trim() === 'Daily Cash Box'
+                                                            ? <span className="px-2 py-1 rounded text-xs font-bold bg-cyan-500/20 text-cyan-400">💵 Daily Cash Box</span>
+                                                            : String(exp.cash_source || '').trim() === 'Personal Money'
+                                                                ? <span className="px-2 py-1 rounded text-xs font-bold bg-yellow-500/20 text-yellow-400">👤 Personal Money</span>
+                                                                : <span className="px-2 py-1 rounded text-xs font-bold bg-gray-500/20 text-gray-400">—</span>}
                                                 </td>
                                                 <td className="p-4 text-red-400 font-bold text-right font-mono">-₹{exp.amount}</td>
                                                 <td className="p-4 text-center">
@@ -8762,10 +9033,21 @@ onClick={requestValoNotificationPermission}
                                                     const lowerQ = menuSearchQuery.toLowerCase();
                                                     return item.category_id === cat.id && (cat.name.toLowerCase().includes(lowerQ) || item.name.toLowerCase().includes(lowerQ) || (item.description && item.description.toLowerCase().includes(lowerQ)));
                                                 }).map((item, idx) => ( 
-                                                    <div key={idx} className={`flex items-center gap-3 bg-black/20 p-3 rounded-xl border ${item.in_stock === false ? 'border-red-500/30 opacity-75' : 'border-white/5 hover:border-white/10 transition'}`}>
-                                                        <img src={item.img} className={`w-12 h-12 rounded-lg object-cover ${item.in_stock === false ? 'grayscale' : ''}`} />
-                                                        <div className="flex-1 min-w-0"><h4 className="font-bold text-sm truncate">{item.name} {item.is_special && '⭐'}</h4><p className="text-xs text-gray-500">{item.price} {menuRecipes[item.id]?.length ? `• 🍳 ${menuRecipes[item.id].length} ingredients` : ''}</p></div>
-                                                        <div className="flex gap-2"><button onClick={() => toggleSpecial(item)} className={`p-2 rounded text-xs ${item.is_special ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-400'}`}>★</button><button onClick={() => setItemModal({open:true, mode:'edit', data:item})} className="text-xs bg-blue-500/10 text-blue-400 p-2 rounded hover:bg-blue-50 hover:text-white">✏️</button><button onClick={() => openRecipeEditor(item)} className="text-xs bg-orange-500/10 text-orange-400 p-2 rounded hover:bg-orange-500 hover:text-white" title="Recipe">🍳</button><button onClick={() => toggleStock(item)} className={`text-[10px] font-bold px-2 py-1 rounded transition ${item.in_stock !== false ? 'bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-black' : 'bg-red-500/20 text-red-400 hover:bg-red-50 hover:text-white'}`}>{item.in_stock !== false ? 'In' : 'Out'}</button><button onClick={() => deleteItem(item.id)} className="text-xs bg-red-500/10 text-red-400 p-2 rounded hover:bg-red-50 hover:text-white">🗑</button></div>
+                                                    <div key={idx} className={`flex flex-col gap-3 bg-black/20 p-3 rounded-2xl border shadow-sm ${item.in_stock === false ? 'border-red-500/30 opacity-75' : 'border-white/5 hover:border-white/10 transition'}`}>
+                                                        <div className="flex items-center gap-3 min-w-0 w-full md:flex-1">
+                                                            <img src={item.img} loading="lazy" decoding="async" fetchPriority="low" className={`w-14 h-14 md:w-12 md:h-12 shrink-0 rounded-xl object-cover ring-1 ring-white/10 ${item.in_stock === false ? 'grayscale' : ''}`} />
+                                                            <div className="flex-1 min-w-0 pr-1">
+                                                                <h4 className="font-black text-[15px] leading-tight text-white break-words">{item.name} {item.is_special && '⭐'}</h4>
+                                                                <p className="text-xs text-gray-400 mt-1 font-semibold">₹{item.price} {menuRecipes[item.id]?.length ? `• 🍳 ${menuRecipes[item.id].length} ingredients` : ''}</p>
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid grid-cols-5 gap-2 w-full md:flex md:items-center md:justify-end md:gap-2 md:w-auto shrink-0 md:-mt-12 md:ml-auto">
+                                                            <button type="button" onClick={() => toggleSpecial(item)} className={`h-10 rounded-xl flex items-center justify-center text-sm font-bold transition border border-white/5 ${item.is_special ? 'bg-yellow-500/15 text-yellow-400' : 'bg-white/5 text-gray-500 hover:text-yellow-400 hover:bg-yellow-500/10'}`} title="Special">★</button>
+                                                            <button type="button" onClick={() => setItemModal({open:true, mode:'edit', data:item})} className="h-10 rounded-xl bg-blue-500/10 text-blue-400 hover:bg-blue-500 hover:text-white transition flex items-center justify-center" title="Edit">✏️</button>
+                                                            <button type="button" onClick={() => openRecipeEditor(item)} className="h-10 rounded-xl bg-orange-500/10 text-orange-400 hover:bg-orange-500 hover:text-white transition flex items-center justify-center" title="Recipe">🍳</button>
+                                                            <button type="button" onClick={() => toggleStock(item)} className={`h-10 rounded-xl text-[11px] font-black transition flex items-center justify-center ${item.in_stock !== false ? 'bg-green-500/15 text-green-400 hover:bg-green-500 hover:text-black' : 'bg-red-500/15 text-red-400 hover:bg-red-500 hover:text-white'}`} title={item.in_stock !== false ? 'In Stock' : 'Out of Stock'}>{item.in_stock !== false ? 'In' : 'Out'}</button>
+                                                            <button type="button" onClick={() => deleteItem(item.id)} className="h-10 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white transition flex items-center justify-center" title="Delete">🗑</button>
+                                                        </div>
                                                     </div> 
                                                 ))}
                                             </div>
@@ -8786,7 +9068,7 @@ onClick={requestValoNotificationPermission}
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                 {moments.map(m => ( 
                                     <div key={m.id} className="relative group rounded-xl overflow-hidden aspect-[3/4]">
-                                        <img src={m.src} className="w-full h-full object-cover" />
+                                        <img src={m.src} loading="lazy" decoding="async" fetchPriority="low" className="w-full h-full object-cover" />
                                         <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent"></div>
                                         <p className="absolute bottom-2 left-2 text-xs font-bold text-white z-10">{m.caption}</p>
                                         

@@ -1,5 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { Capacitor } from '@capacitor/core'
 import './index.css'
 import App from './App.jsx'
 
@@ -8,7 +9,8 @@ createRoot(document.getElementById('root')).render(
     <App />
   </StrictMode>,
 )
-if ('serviceWorker' in navigator) {
+
+if (!Capacitor.isNativePlatform() && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/sw.js')
@@ -16,13 +18,13 @@ if ('serviceWorker' in navigator) {
         console.log(
           'VALO Service Worker registered:',
           registration.scope
-        );
+        )
       })
       .catch((error) => {
         console.error(
           'VALO Service Worker registration failed:',
           error
-        );
-      });
-  });
+        )
+      })
+  })
 }
