@@ -551,6 +551,7 @@ function AdminLogin({ onAccess }) {
 }
 
 function AdminDashboard({ appMode, toggleMode, operator, onLockApp }) {
+    const [showValoAI, setShowValoAI] = useState(false);
     const [activeTab, setActiveTab] = useState('orders');
      const [opsTab, setOpsTab] = useState('staff');
     
@@ -833,188 +834,26 @@ const [staffForm, setStaffForm] = useState({ staff_name: '', name: '', qty: 1, p
     };
 
     // ============================================================
-    // FULL OFFLINE-FIRST CONNECTION / SYNC CONTROLLER
-    // - Keeps the whole dashboard usable while disconnected.
-    // - Shows a persistent Offline Mode banner.
-    // - Shows a blocking sync loader when connectivity returns and
-    //   there are queued mutations waiting for Supabase.
-    // - Never clears a queue item until its operation succeeds.
+    // ONLINE-ONLY CONNECTION GUARD
+    // Offline queue replay is intentionally disabled. VALO requires
+    // a live connection and must not write locally or replay stale work.
     // ============================================================
     useEffect(() => {
-        let cancelled = false;
-        let progressTimer = null;
-        let syncing = false;
-
-        const refreshQueue = async () => {
-            const count = await getOfflineQueueCount();
-            if (!cancelled) setPendingSyncCount(count);
-            return count;
-        };
-
-        const pollProgress = () => {
-            if (progressTimer) window.clearInterval(progressTimer);
-            progressTimer = window.setInterval(async () => {
-                const remaining = await getOfflineQueueCount();
-                if (cancelled) return;
-                setPendingSyncCount(remaining);
-                setSyncProgress(prev => ({ ...prev, remaining }));
-            }, 250);
-        };
-
-        const stopProgress = () => {
-            if (progressTimer) window.clearInterval(progressTimer);
-            progressTimer = null;
-        };
-
-        const runWithTimeout = async (promise, timeoutMs = 7000) => {
-            let timer;
-            try {
-                return await Promise.race([
-                    promise,
-                    new Promise(resolve => {
-                        timer = window.setTimeout(() => resolve({ __timedOut: true }), timeoutMs);
-                    })
-                ]);
-            } finally {
-                if (timer) window.clearTimeout(timer);
-            }
-        };
-
-        const syncNow = async () => {
-            if (cancelled || syncing || isBrowserOffline()) return;
-            syncing = true;
-            setSyncError('');
-
-            try {
-                const before = await refreshQueue();
-                if (!before) {
-                    if (!cancelled) {
-                        setOfflineSyncing(false);
-                        setOfflineSyncStatus('online');
-                        setSyncProgress({ total: 0, remaining: 0 });
-                    }
-                    return;
-                }
-
-                setOfflineSyncing(true);
-                setOfflineSyncStatus('syncing');
-                setSyncProgress({ total: before, remaining: before });
-                pollProgress();
-
-                await syncOfflineSupabaseQueue(processCustomOfflineQueue);
-
-                // Reconcile only the tables that can be changed by the custom
-                // offline queue. The old code called fetchData() here, which
-                // downloaded the complete dashboard again after every sync.
-                // Realtime already updates the other tables directly.
-                if (!isBrowserOffline()) {
-                    const refreshResult = await runWithTimeout(
-                        Promise.all([
-                            fetchOrders(),
-                            fetchInventory(),
-                            fetchMenuRecipes()
-                        ]),
-                        7000
-                    );
-                    if (refreshResult?.__timedOut) {
-                        console.warn('VALO sync refresh timed out; local synced state will remain visible.');
-                    }
-                }
-
-                const remaining = await refreshQueue();
-                if (!cancelled) {
-                    setSyncProgress({ total: before, remaining });
-                    setOfflineSyncing(false);
-                    if (remaining === 0) {
-                        setOfflineSyncStatus('synced');
-                        window.setTimeout(() => {
-                            if (!cancelled) {
-                                setOfflineSyncStatus('online');
-                                setSyncProgress({ total: 0, remaining: 0 });
-                            }
-                        }, 1800);
-                    } else {
-                        setOfflineSyncStatus(isBrowserOffline() ? 'offline' : 'error');
-                        setSyncError(`${remaining} change${remaining === 1 ? '' : 's'} still waiting to sync.`);
-                    }
-                }
-            } catch (error) {
-                const remaining = await refreshQueue();
-                if (!cancelled) {
-                    setOfflineSyncing(false);
-                    setOfflineSyncStatus(isBrowserOffline() ? 'offline' : 'error');
-                    setSyncError(error?.message || `Unable to sync ${remaining} pending change${remaining === 1 ? '' : 's'}.`);
-                }
-            } finally {
-                stopProgress();
-                if (!cancelled) setOfflineSyncing(false);
-                syncing = false;
-            }
-        };
-
-        const handleOffline = async () => {
-            if (cancelled) return;
-            setIsOnline(false);
+        const updateConnection = () => {
+            const online = typeof navigator !== 'undefined' && navigator.onLine;
+            setIsOnline(online);
             setOfflineSyncing(false);
-            setOfflineSyncStatus('offline');
-            setSyncError('');
-            const count = await refreshQueue();
-            setOfflinePopup(true);
-            window.setTimeout(() => { if (!cancelled) setOfflinePopup(false); }, 4500);
-            pushAppNotification(
-                '🔴 Offline Mode',
-                count > 0
-                    ? `Internet connection lost. VALO is working locally. ${count} change${count === 1 ? '' : 's'} will sync automatically.`
-                    : 'Internet connection lost. VALO is working locally. New changes will sync automatically.',
-                'warning'
-            );
+            setOfflineSyncStatus(online ? 'online' : 'offline');
+            setOfflinePopup(!online);
         };
 
-        const handleOnline = async () => {
-            if (cancelled) return;
-            setIsOnline(true);
-            setSyncError('');
-            const count = await refreshQueue();
-            if (count > 0) {
-                pushAppNotification('🟠 Internet Restored', `Syncing ${count} pending change${count === 1 ? '' : 's'} now...`, 'info');
-                await syncNow();
-            } else {
-                setOfflineSyncStatus('online');
-            }
-        };
-
-        installOfflineSupabaseFetch(supabase);
-        window.addEventListener('online', handleOnline);
-        window.addEventListener('offline', handleOffline);
-
-        (async () => {
-            const count = await refreshQueue();
-            if (cancelled) return;
-            if (isBrowserOffline()) {
-                setIsOnline(false);
-                setOfflineSyncStatus('offline');
-                return;
-            }
-            setIsOnline(true);
-            if (count > 0) await syncNow();
-            else setOfflineSyncStatus('online');
-        })();
-
-        // navigator.onLine can briefly report online before the connection is
-        // actually usable. Retry pending work quietly until it is confirmed.
-        const retryTimer = window.setInterval(async () => {
-            if (!cancelled && !isBrowserOffline() && !syncing) {
-                const count = await refreshQueue();
-                if (count > 0) await syncNow();
-            }
-        }, 5000);
+        updateConnection();
+        window.addEventListener('online', updateConnection);
+        window.addEventListener('offline', updateConnection);
 
         return () => {
-            window.clearInterval(retryTimer);
-            cancelled = true;
-            stopProgress();
-            window.removeEventListener('online', handleOnline);
-            window.removeEventListener('offline', handleOffline);
+            window.removeEventListener('online', updateConnection);
+            window.removeEventListener('offline', updateConnection);
         };
     }, []);
 
@@ -1205,7 +1044,7 @@ const logOrderActivity = async (orderId, action, description) => {
 };
 
 const openOrderActivity = async (order) => {
-    setOrderActivityModal({ open: true, orderId: order.id, orderLabel: order.displayId || order.id, rows: [], loading: true });
+    setOrderActivityModal({ open: true, orderId: order.id, orderLabel: order.id, rows: [], loading: true });
     const { data, error } = await supabase.from('order_activity_log').select('id,operator_name,operator_role,action,description,created_at').eq('order_id', order.id).order('created_at', { ascending: false }).limit(100);
     if (error) {
         console.error('Activity load error:', error);
@@ -1614,14 +1453,16 @@ useEffect(() => {
             item_names: o.item_names ?? o.order_details?.item_names ?? ''
         })).sort((a, b) => Number(b.id || 0) - Number(a.id || 0))
     );
-
-    const fetchUsers = async () => loadCachedThenRefresh(
-        'users', setUsers,
-        () => fetchAllRows(
-            () => supabase.from('users').select('id,name,phone,joined_at,total_orders').order('joined_at', { ascending: false }),
-            'users'
-        )
-    );
+const fetchUsers = async () => loadCachedThenRefresh(
+    'users', setUsers,
+    () => fetchAllRows(
+        () => supabase
+            .from('users')
+            .select('name,phone,joined_at,total_orders')
+            .order('joined_at', { ascending: false }),
+        'users'
+    )
+);
 
     const fetchCategories = async () => loadCachedThenRefresh(
         'categories', setCategories,
@@ -4209,7 +4050,7 @@ const handleCreateBillOnline = async () => {
             <!DOCTYPE html>
             <html>
             <head>
-                <title>Print Bill - Order #${order.displayId || order.id}</title>
+                <title>Print Bill - Order #${order.id}</title>
                 <style media="print">
                     @page { size: 48mm auto; margin: 0; } 
                     html, body { margin: 0; padding: 0; background: #fff; height: auto; } 
@@ -4236,7 +4077,7 @@ const handleCreateBillOnline = async () => {
                     <div class="center bold" style="font-size: 16px;">VALO HOTEL</div>
                     <div class="center">Order Receipt</div>
                     <div class="divider"></div>
-                    <div class="row"><span>Order</span><span>#${order.displayId || order.id}</span></div>
+                    <div class="row"><span>Order</span><span>#${order.id}</span></div>
                     <div class="row"><span>Table</span><span>${order.tableNo}</span></div>
                     <div class="row"><span>Date</span><span>${order.date}</span></div>
                     <div class="row"><span>Time</span><span>${order.time}</span></div>
@@ -4320,7 +4161,7 @@ const handleCreateBillOnline = async () => {
                         <p style="margin: 5px 0 0; font-size: 14px; color: #555;">Order Receipt</p>
                     </div>
                     <div style="margin-bottom: 20px; font-size: 13px; line-height: 1.6;">
-                        <div style="display:flex; justify-content:space-between;"><strong>Order ID:</strong> <span>#${order.displayId || order.id}</span></div>
+                        <div style="display:flex; justify-content:space-between;"><strong>Order ID:</strong> <span>#${order.id}</span></div>
                         <div style="display:flex; justify-content:space-between;"><strong>Date:</strong> <span>${order.date} ${order.time || ''}</span></div>
                         <div style="display:flex; justify-content:space-between;"><strong>Customer:</strong> <span>${order.customer?.name || 'Walk-in'}</span></div>
                         <div style="display:flex; justify-content:space-between;"><strong>Phone:</strong> <span>${order.customer?.phone || 'N/A'}</span></div>
@@ -4349,14 +4190,14 @@ const handleCreateBillOnline = async () => {
 
             const opt = {
                 margin: 5,
-                filename: `Valo_Order_${order.displayId || order.id}.pdf`,
+                filename: `Valo_Order_${order.id}.pdf`,
                 image: { type: 'jpeg', quality: 0.98 },
                 html2canvas: { scale: 2 },
                 jsPDF: { unit: 'mm', format: 'a5', orientation: 'portrait' }
             };
 
             const pdfBlob = await window.html2pdf().from(container.children[0]).set(opt).output('blob');
-            const file = new File([pdfBlob], `Valo_Order_${order.displayId || order.id}.pdf`, { type: 'application/pdf' });
+            const file = new File([pdfBlob], `Valo_Order_${order.id}.pdf`, { type: 'application/pdf' });
 
             document.body.removeChild(container);
 
@@ -4843,7 +4684,7 @@ const handleCreateBillOnline = async () => {
 
     const handleExportAnalytics = () => {
         const data = getFilteredTransactions().map(o => ({
-            "Order ID": o.displayId || o.id,
+            "Order ID": o.id,
             "Date": o.date,
             "Time": o.time,
             "Customer": o.customer?.name || 'Walk-in',
@@ -5634,7 +5475,7 @@ const handleCreateBillOnline = async () => {
 
     const handleExportHistory = () => {
         const data = getSortedHistory().map(o => ({
-            "Order ID": o.displayId || o.id,
+            "Order ID": o.id,
             "Date": o.date,
             "Time": o.time,
             "Table": o.tableNo,
@@ -7437,7 +7278,7 @@ const handleCreateBillOnline = async () => {
 
                     if (categoryTotal > 0) {
                         detailsList.push({
-                            id: order.displayId || order.id,
+                            id: order.id,
                             date: order.date,
                             time: order.time,
                             customer: order.customer?.name || 'Walk-in',
@@ -7524,7 +7365,7 @@ const handleCreateBillOnline = async () => {
                                 <tbody>
                                     {orders.filter(o => o.paymentStatus === 'Pending' && o.status !== 'Merged').map(order => (
                                         <tr key={order.id} className="border-b border-white/5 hover:bg-white/5">
-                                            <td className={`p-4 font-mono text-white ${isMergedOrder(order) ? 'cursor-pointer hover:text-orange-300 underline decoration-dotted underline-offset-4' : ''}`} onClick={() => isMergedOrder(order) && openMergeOrUnmerge(order)} title={isMergedOrder(order) ? 'Click to view merged orders and unmerge a specific order' : undefined}>#{order.displayId || order.id}</td>
+                                            <td className={`p-4 font-mono text-white ${isMergedOrder(order) ? 'cursor-pointer hover:text-orange-300 underline decoration-dotted underline-offset-4' : ''}`} onClick={() => isMergedOrder(order) && openMergeOrUnmerge(order)} title={isMergedOrder(order) ? 'Click to view merged orders and unmerge a specific order' : undefined}>#{order.id}</td>
                                             <td className="p-4 whitespace-nowrap">{order.date} <span className="text-[10px] text-gray-500 block">{order.time}</span></td>
                                             <td className="p-4 font-bold text-white">{order.customer?.name || 'Walk-in'} {order.customer?.phone && <span className="block text-[10px] text-gray-400 font-normal">{order.customer.phone}</span>}</td>
                                             <td className="p-4 font-bold text-red-400">₹{order.total}</td>
@@ -7675,7 +7516,7 @@ const handleCreateBillOnline = async () => {
 
           {/* SIDEBAR */}
             {isSidebarOpen && (<div onClick={() => setIsSidebarOpen(false)} className="fixed inset-0 bg-black/80 z-40 md:hidden backdrop-blur-sm animate-fade-in"></div>)}
-           <aside className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 border-r border-white/10 p-6 flex flex-col transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}`}>
+           <aside className={`valo-sidebar fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 border-r border-white/10 p-6 flex flex-col transition-transform duration-300 ease-in-out md:relative md:translate-x-0 ${isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'}`}>
                 <div className="flex justify-between items-center mb-10">
                     <div className="flex items-center gap-3">
                         <div className="w-10 h-10 bg-cyan-500 rounded-lg flex items-center justify-center font-bold text-black text-xl">{appName.charAt(0).toUpperCase()}</div>
@@ -7693,9 +7534,24 @@ const handleCreateBillOnline = async () => {
                         </div>
                     </div>
 
-                    <button onClick={() => setIsSidebarOpen(false)} className="md:hidden p-2 text-gray-400">
-                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                    </button>
+                    <button
+  onClick={() => setIsSidebarOpen(false)}
+  className="sidebar-close-button md:hidden p-2 text-gray-400"
+>
+  <svg
+    className="w-6 h-6"
+    fill="none"
+    stroke="currentColor"
+    viewBox="0 0 24 24"
+  >
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      d="M6 18L18 6M6 6l12 12"
+    />
+  </svg>
+</button>
                 </div>
                 <nav className="space-y-2 flex-1 overflow-y-auto pr-2 scrollbar-hide">
                     {/* --- UNLOCKED TABS (Always accessible) --- */}
@@ -7726,10 +7582,25 @@ const handleCreateBillOnline = async () => {
                 </div>
             </aside> {/* <--- THIS CLOSING TAG FIXES THE ERROR */}
            <div className="flex-1 flex flex-col h-screen overflow-hidden">
-                <header className="md:hidden bg-slate-900 border-b border-white/10 p-4 flex items-center justify-between z-30 sticky top-0">
-                    <button onClick={() => setIsSidebarOpen(true)} className="p-2 bg-white/10 rounded-lg">
-                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
-                    </button>
+                <header className="valo-main-header md:hidden bg-slate-900 border-b border-white/10 p-4 flex items-center justify-between z-30 sticky top-0 shrink-0">
+                    <button
+  onClick={() => setIsSidebarOpen(true)}
+  className="valo-menu-button p-2 bg-white/10 rounded-lg"
+>
+  <svg
+    className="w-6 h-6"
+    fill="none"
+    stroke="currentColor"
+    viewBox="0 0 24 24"
+  >
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      d="M4 6h16M4 12h16M4 18h16"
+    />
+  </svg>
+</button>
                     <div className="text-center min-w-0"><span className="font-bold text-[22px] text-cyan-400 tracking-wide block truncate">{appName}</span><span className="text-[9px] text-gray-500 block truncate">{currentOperator.name}</span></div>
                     
                     <div className="flex items-center">
@@ -7798,7 +7669,7 @@ onClick={requestValoNotificationPermission}
                                     <div className="flex justify-between items-start mb-4">
                                         <div>
                                             <div className="flex items-center gap-3">
-                                                <span className="text-2xl font-bold">Order #{order.displayId || order.id}</span>
+                                                <span className="text-2xl font-bold">Order #{order.id}</span>
                                                 <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-1 rounded">PAYMENT PENDING</span>
                                             </div>
                                             <p className="text-sm text-gray-400">Location: {order.tableNo} • {order.customer?.name} • {order.customer?.phone}</p>
@@ -8660,7 +8531,7 @@ onClick={requestValoNotificationPermission}
                                         <div className="flex justify-between items-start mb-4">
                                             <div>
                                                 <div className="flex items-center gap-3">
-                                                    <span className="text-2xl font-bold">Order #{order.displayId || order.id}</span>
+                                                    <span className="text-2xl font-bold">Order #{order.id}</span>
                                                     {order.paymentStatus === 'Paid' ? <span className="bg-green-500 text-black text-[10px] font-bold px-2 py-1 rounded">{order.paymentMethod || 'PAID'}</span> : <span className="bg-yellow-500 text-black text-[10px] font-bold px-2 py-1 rounded">PENDING</span>}
                                                 </div>
                                                 <p className="text-sm text-gray-400">Location: {order.tableNo} • {order.customer?.name} • {order.customer?.phone}</p>
@@ -8963,7 +8834,7 @@ onClick={requestValoNotificationPermission}
                                         <tbody>
                                             {currentTxns.map(order => ( 
                                                 <tr key={order.id} className="border-b border-white/5 hover:bg-white/5">
-                                                    <td className="p-4 font-mono text-white">#{order.displayId || order.id}</td>
+                                                    <td className="p-4 font-mono text-white">#{order.id}</td>
                                                     <td className="p-4">{order.date} {order.time}</td>
                                                     <td className="p-4">{order.customer?.name || 'Walk-in'}</td>
                                                     <td className="p-4 font-bold text-green-400">₹{order.total}</td>
@@ -9185,7 +9056,7 @@ onClick={requestValoNotificationPermission}
                                         <tbody>
                                             {getSortedHistory().map(order => ( 
                                                 <tr key={order.id} className="border-b border-white/5 hover:bg-white/5 transition">
-                                                    <td className="p-4 font-bold text-white">#{order.displayId || order.id}</td>
+                                                    <td className="p-4 font-bold text-white">#{order.id}</td>
                                                     <td className="p-4">{order.date} {order.time}</td>
                                                     <td className="p-4">{order.tableNo} • {order.customer?.name}</td>
                                                     <td className="p-4 text-green-400 font-bold">₹{order.total}</td>
@@ -9415,8 +9286,172 @@ onClick={requestValoNotificationPermission}
                         </div>
                     )}
                 </main>
+                {operator?.role === 'admin' && (
+                    <ValoAIFloatingAssistant open={showValoAI} onOpen={() => setShowValoAI(true)} onClose={() => setShowValoAI(false)} />
+                )}
             </div>
         </div>
+    );
+}
+
+function ValoAIFloatingAssistant({ open, onOpen, onClose }) {
+    const [message, setMessage] = useState('');
+    const [messages, setMessages] = useState([{ role: 'assistant', text: 'Hi! I’m VALO AI Manager. I’m designed to help with purchases, expenses, inventory, and physical stock audits. Before I can make changes, the secure AI backend must be connected.' }]);
+    const [busy, setBusy] = useState(false);
+    const [listening, setListening] = useState(false);
+    const recognitionRef = useRef(null);
+
+    const startVoiceInput = () => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            setMessages(prev => [...prev, { role: 'assistant', text: 'Voice recognition is not available in this browser. Please type your command instead.' }]);
+            return;
+        }
+        try {
+            const recognition = new SpeechRecognition();
+            recognition.lang = 'hi-IN';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+            recognition.onresult = event => {
+                const transcript = event.results?.[0]?.[0]?.transcript || '';
+                setMessage(transcript);
+                setListening(false);
+            };
+            recognition.onerror = () => setListening(false);
+            recognition.onend = () => setListening(false);
+            recognitionRef.current = recognition;
+            setListening(true);
+            recognition.start();
+        } catch (error) {
+            setListening(false);
+            console.warn('VALO AI voice input could not start:', error);
+        }
+    };
+
+    const sendMessage = async (event) => {
+        event?.preventDefault?.();
+        const text = message.trim();
+        if (!text || busy) return;
+        setMessages(prev => [...prev, { role: 'user', text }]);
+        setMessage('');
+        setBusy(true);
+        try {
+            // This endpoint must be implemented on a trusted backend. Do not expose
+            // AI provider keys in the React client or let the model write to Supabase directly.
+            const adminAiEndpoint = (import.meta.env.VITE_VALO_AI_API_URL || 'https://valo-admin-ai.sahilmeshram1917.workers.dev/api/admin-ai').trim();
+            const response = await fetch(adminAiEndpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text, context: 'admin_inventory_expenses_purchases_stock_audit' })
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload?.error || `AI service returned ${response.status}`);
+            setMessages(prev => [...prev, { role: 'assistant', text: payload?.reply || 'I received the response, but it did not include a reply.' }]);
+        } catch (error) {
+            console.error('VALO Admin AI request failed:', error);
+            const detail = error?.message ? ` Details: ${error.message}` : '';
+            setMessages(prev => [...prev, {
+                role: 'assistant',
+                text: `I couldn't reach the VALO AI backend, so I have not changed any purchases, expenses, or stock. Check the Cloudflare Worker URL, CORS settings, and deployment.${detail}`
+            }]);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    // Lock the page behind the assistant while it is open. Keep the chat itself usable,
+    // and restore the exact previous scroll position when it closes (including on iPhone).
+    useEffect(() => {
+        if (!open) return undefined;
+
+        const html = document.documentElement;
+        const body = document.body;
+        const scrollY = window.scrollY || window.pageYOffset || 0;
+        const previous = {
+            bodyPosition: body.style.position,
+            bodyTop: body.style.top,
+            bodyLeft: body.style.left,
+            bodyRight: body.style.right,
+            bodyWidth: body.style.width,
+            bodyOverflow: body.style.overflow,
+            htmlOverflow: html.style.overflow,
+            htmlOverscroll: html.style.overscrollBehavior,
+        };
+
+        html.classList.add('ai-chat-open');
+        body.classList.add('ai-chat-open');
+        html.style.overflow = 'hidden';
+        html.style.overscrollBehavior = 'none';
+        body.style.position = 'fixed';
+        body.style.top = `-${scrollY}px`;
+        body.style.left = '0';
+        body.style.right = '0';
+        body.style.width = '100%';
+        body.style.overflow = 'hidden';
+
+        return () => {
+            html.classList.remove('ai-chat-open');
+            body.classList.remove('ai-chat-open');
+            body.style.position = previous.bodyPosition;
+            body.style.top = previous.bodyTop;
+            body.style.left = previous.bodyLeft;
+            body.style.right = previous.bodyRight;
+            body.style.width = previous.bodyWidth;
+            body.style.overflow = previous.bodyOverflow;
+            html.style.overflow = previous.htmlOverflow;
+            html.style.overscrollBehavior = previous.htmlOverscroll;
+            window.scrollTo(0, scrollY);
+        };
+    }, [open]);
+
+    useEffect(() => () => { try { recognitionRef.current?.stop?.(); } catch {} }, []);
+
+    return (
+        <>
+            {!open && (
+                <button type="button" onClick={onOpen} aria-label="Open VALO AI Manager" title="VALO AI Manager" className="fixed z-[100] bottom-5 right-5 md:bottom-7 md:right-7 w-16 h-16 rounded-full bg-gradient-to-br from-cyan-300 via-cyan-500 to-blue-600 text-slate-950 shadow-[0_12px_40px_rgba(6,182,212,0.45)] border border-cyan-100/50 flex items-center justify-center hover:scale-105 active:scale-95 transition-transform focus:outline-none focus:ring-4 focus:ring-cyan-300/40">
+                    <span className="text-2xl" aria-hidden="true">✦</span>
+                    <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-emerald-400 border-2 border-slate-950" />
+                </button>
+            )}
+            {open && (
+                <>
+                    {/* Intercepts all background taps while the assistant is open. */}
+                    <div
+                        className="fixed inset-0 z-[105] bg-black/35"
+                        aria-hidden="true"
+                        onClick={(event) => event.stopPropagation()}
+                        onTouchMove={(event) => event.preventDefault()}
+                    />
+                    <div className="ai-chat-panel fixed z-[110] bottom-4 right-4 left-4 sm:left-auto sm:w-[390px] h-[min(680px,calc(100dvh-2rem))] bg-slate-950 border border-cyan-400/30 rounded-3xl shadow-2xl shadow-black/50 flex flex-col overflow-hidden">
+                    <div className="px-4 py-4 bg-gradient-to-r from-slate-900 via-slate-900 to-cyan-950 border-b border-white/10 flex items-center gap-3">
+                        <div className="w-11 h-11 rounded-full bg-gradient-to-br from-cyan-300 to-blue-600 flex items-center justify-center text-slate-950 text-xl shadow-lg">✦</div>
+                        <div className="flex-1 min-w-0"><div className="font-black text-white">VALO AI Manager</div><div className="text-xs text-cyan-300">Admin only · Purchases · Expenses · Stock</div></div>
+                        <button type="button" onClick={onClose} aria-label="Close assistant" className="w-9 h-9 rounded-full bg-white/10 text-white hover:bg-white/20">✕</button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                        <div className="rounded-2xl border border-amber-400/20 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-100"><b>Setup status:</b> Assistant interface is ready, but live AI actions require the secure backend endpoint. No financial or stock changes will be made until it is connected.</div>
+                        {messages.map((item, index) => (
+                            <div key={`${item.role}-${index}`} className={`flex ${item.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div className={`max-w-[88%] rounded-2xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${item.role === 'user' ? 'bg-cyan-500 text-slate-950 rounded-br-md' : 'bg-slate-800 border border-white/5 text-slate-100 rounded-bl-md'}`}>{item.text}</div>
+                            </div>
+                        ))}
+                        {busy && <div className="text-xs text-cyan-300 animate-pulse">Connecting securely…</div>}
+                    </div>
+                    <div className="p-3 border-t border-white/10 bg-slate-900/90">
+                        <div className="flex flex-wrap gap-2 mb-3">
+                            {['Today’s expenses', 'Check stock difference', 'Record a purchase'].map(prompt => <button key={prompt} type="button" onClick={() => setMessage(prompt)} className="text-[11px] px-2.5 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-300 hover:border-cyan-400/50">{prompt}</button>)}
+                        </div>
+                        <form onSubmit={sendMessage} className="flex items-end gap-2">
+                            <button type="button" onClick={startVoiceInput} title="Speak a command" aria-label="Speak a command" className={`shrink-0 w-11 h-11 rounded-xl flex items-center justify-center ${listening ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-800 text-cyan-300 border border-white/10'}`}>{listening ? '●' : '🎙'}</button>
+                            <textarea value={message} onChange={e => setMessage(e.target.value)} rows={1} placeholder="Ask about expenses, purchases or stock…" className="flex-1 resize-none max-h-24 min-h-11 rounded-xl bg-slate-800 border border-white/10 px-3 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-cyan-400" onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(e); } }} />
+                            <button type="submit" disabled={!message.trim() || busy} aria-label="Send message" className="shrink-0 w-11 h-11 rounded-xl bg-cyan-500 text-slate-950 font-black disabled:opacity-40">➤</button>
+                        </form>
+                    </div>
+                    </div>
+                </>
+            )}
+        </>
     );
 }
 
