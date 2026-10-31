@@ -792,6 +792,26 @@ const wrappedFetchImpl = async (
         request
       );
 
+    // PostgREST 4xx errors are application/schema errors, not network
+    // failures. Preserve the original Response for Supabase, but log its
+    // response body so the exact rejected column/constraint is visible.
+    if (!response.ok) {
+      try {
+        const errorBody = await response.clone().text();
+        let parsedError = errorBody;
+        try { parsedError = JSON.parse(errorBody); } catch (_) {}
+
+        console.error('VALO Supabase request rejected:', {
+          method,
+          status: response.status,
+          url,
+          details: parsedError
+        });
+      } catch (diagnosticError) {
+        console.warn('Could not read Supabase error response:', diagnosticError);
+      }
+    }
+
     return response;
   } catch (error) {
     if (
@@ -1066,18 +1086,21 @@ const replayGenericItem =
         );
 
       if (!response.ok) {
-        if (
-          response.status >= 500 ||
-          response.status === 429
-        ) {
+        const errorBody = await response.clone().text().catch(() => '');
+        let parsedError = errorBody;
+        try { parsedError = JSON.parse(errorBody); } catch (_) {}
+
+        console.error('VALO offline mutation rejected by server:', {
+          status: response.status,
+          url,
+          details: parsedError
+        });
+
+        // Retry transient server/rate-limit errors; keep permanent 4xx
+        // failures queued so the user can inspect and resolve them.
+        if (response.status >= 500 || response.status === 429) {
           return false;
         }
-
-        console.warn(
-          'VALO offline mutation rejected by server:',
-          response.status,
-          url
-        );
 
         return false;
       }
